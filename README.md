@@ -15,11 +15,10 @@ Any DAP-compliant debug adapter works. Built-in defaults for:
 | Language | Adapter | Install |
 |----------|---------|---------|
 | Python | debugpy | `pip install debugpy` |
-| Node.js | js-debug | `npm install -g @vscode/js-debug` |
 | Go | Delve | `go install github.com/go-delve/delve/cmd/dlv@latest` |
 | C/C++ | lldb-dap | `apt install lldb` / `brew install llvm` |
 
-Custom adapters can be registered via the `configure_adapter` tool or config files.
+Additional adapters (e.g. Node.js via js-debug) can be registered via the `configure_adapter` tool or config files.
 
 ## MCP Tools
 
