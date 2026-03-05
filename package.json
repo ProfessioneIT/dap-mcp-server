@@ -1,0 +1,28 @@
+{
+  "name": "dap-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server wrapping the Debug Adapter Protocol for AI-driven debugging",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "dap-mcp-server": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node build/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@vscode/debugprotocol": "^1.68.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
