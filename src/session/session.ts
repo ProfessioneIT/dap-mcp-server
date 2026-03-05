@@ -1,0 +1,355 @@
+import { DAPClient } from "../dap/dap-client.js";
+import { RingBuffer } from "../dap/ring-buffer.js";
+import {
+  SessionState,
+  StoppedState,
+  AdapterConfig,
+  OutputEntry,
+  BreakpointConfig,
+  BreakpointResult,
+} from "../dap/types.js";
+import { DebugProtocol } from "@vscode/debugprotocol";
+import path from "node:path";
+
+const MAX_OUTPUT_LINES = 10000;
+const DEFAULT_TIMEOUT = 30000;
+
+export class DebugSession {
+  readonly id: string;
+  private client: DAPClient;
+  private adapterConfig: AdapterConfig;
+  private _state: SessionState = "idle";
+  private outputBuffer = new RingBuffer<OutputEntry>(MAX_OUTPUT_LINES);
+  private breakpointsMap = new Map<string, BreakpointConfig[]>();
+  private capabilities: DebugProtocol.Capabilities = {};
+  private stoppedThreadId?: number;
+  private stoppedReason?: string;
+  private launchConfig?: Record<string, unknown>;
+  private launchMode: "launch" | "attach" = "launch";
+  private stoppedResolve?: (event: DebugProtocol.StoppedEvent) => void;
+
+  constructor(id: string, config: AdapterConfig) {
+    this.id = id;
+    this.adapterConfig = config;
+    const runtime = config.runtime || "";
+    const program = config.program;
+    const args = config.args || [];
+    this.client = new DAPClient(runtime, program, args);
+
+    this.client.on("event", (event: DebugProtocol.Event) => {
+      this.handleEvent(event);
+    });
+
+    this.client.on("exit", () => {
+      if (this._state !== "terminated") {
+        this._state = "terminated";
+      }
+    });
+  }
+
+  get state(): SessionState {
+    return this._state;
+  }
+
+  async initialize(): Promise<DebugProtocol.Capabilities> {
+    try {
+      await this.client.spawn();
+    } catch (err) {
+      this._state = "terminated";
+      throw err;
+    }
+    try {
+      const response = await this.client.sendRequest("initialize", {
+        adapterID: this.adapterConfig.type,
+        clientID: "dap-mcp-server",
+        clientName: "DAP MCP Server",
+        linesStartAt1: true,
+        columnsStartAt1: true,
+        pathFormat: "path",
+      });
+      this.capabilities = response.body || {};
+      this._state = "configuring";
+      return this.capabilities;
+    } catch (err) {
+      this._state = "terminated";
+      throw err;
+    }
+  }
+
+  async setBreakpoints(
+    filePath: string,
+    breakpoints: BreakpointConfig[]
+  ): Promise<BreakpointResult[]> {
+    const absPath = path.resolve(filePath);
+    this.breakpointsMap.set(absPath, breakpoints);
+    const response = await this.client.sendRequest("setBreakpoints", {
+      source: { path: absPath },
+      breakpoints: breakpoints.map((bp) => ({
+        line: bp.line,
+        condition: bp.condition,
+        hitCondition: bp.hitCondition,
+        logMessage: bp.logMessage,
+      })),
+    });
+    return ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
+      id: bp.id ?? 0,
+      verified: bp.verified ?? false,
+      line: bp.line ?? 0,
+      message: bp.message,
+    }));
+  }
+
+  async setExceptionBreakpoints(filters: string[]): Promise<void> {
+    await this.client.sendRequest("setExceptionBreakpoints", { filters });
+  }
+
+  async configurationDone(): Promise<void> {
+    if (this.capabilities.supportsConfigurationDoneRequest) {
+      await this.client.sendRequest("configurationDone");
+    }
+  }
+
+  async launch(config: Record<string, unknown>): Promise<void> {
+    this.launchConfig = config;
+    this.launchMode = "launch";
+    await this.client.sendRequest("launch", config);
+    this._state = "running";
+  }
+
+  async attach(config: Record<string, unknown>): Promise<void> {
+    this.launchConfig = config;
+    this.launchMode = "attach";
+    await this.client.sendRequest("attach", config);
+    this._state = "running";
+  }
+
+  async continueExecution(threadId?: number): Promise<void> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    await this.client.sendRequest("continue", { threadId: tid });
+    this._state = "running";
+  }
+
+  async next(threadId?: number): Promise<void> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    await this.client.sendRequest("next", { threadId: tid });
+    this._state = "running";
+  }
+
+  async stepIn(threadId?: number): Promise<void> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    await this.client.sendRequest("stepIn", { threadId: tid });
+    this._state = "running";
+  }
+
+  async stepOut(threadId?: number): Promise<void> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    await this.client.sendRequest("stepOut", { threadId: tid });
+    this._state = "running";
+  }
+
+  async pause(threadId?: number): Promise<void> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    await this.client.sendRequest("pause", { threadId: tid });
+  }
+
+  async waitForStopped(timeout = DEFAULT_TIMEOUT): Promise<DebugProtocol.StoppedEvent> {
+    if (this._state === "stopped") {
+      return {
+        seq: 0,
+        type: "event",
+        event: "stopped",
+        body: { reason: this.stoppedReason || "unknown", threadId: this.stoppedThreadId },
+      } as DebugProtocol.StoppedEvent;
+    }
+    return new Promise<DebugProtocol.StoppedEvent>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.stoppedResolve = undefined;
+        reject(new Error("timeout"));
+      }, timeout);
+      this.stoppedResolve = (event) => {
+        clearTimeout(timer);
+        this.stoppedResolve = undefined;
+        resolve(event);
+      };
+    });
+  }
+
+  async getThreads(): Promise<DebugProtocol.Thread[]> {
+    const response = await this.client.sendRequest("threads");
+    return (response.body?.threads as DebugProtocol.Thread[]) || [];
+  }
+
+  async getStackTrace(threadId: number, depth = 10): Promise<DebugProtocol.StackFrame[]> {
+    const response = await this.client.sendRequest("stackTrace", {
+      threadId,
+      startFrame: 0,
+      levels: depth,
+    });
+    return (response.body?.stackFrames as DebugProtocol.StackFrame[]) || [];
+  }
+
+  async getScopes(frameId: number): Promise<DebugProtocol.Scope[]> {
+    const response = await this.client.sendRequest("scopes", { frameId });
+    return (response.body?.scopes as DebugProtocol.Scope[]) || [];
+  }
+
+  async getVariables(
+    variablesReference: number,
+    depth = 1
+  ): Promise<
+    Array<{
+      name: string;
+      value: string;
+      type?: string;
+      hasChildren: boolean;
+      variablesReference: number;
+    }>
+  > {
+    const response = await this.client.sendRequest("variables", { variablesReference });
+    const vars = ((response.body?.variables as DebugProtocol.Variable[]) || []).map((v) => ({
+      name: v.name,
+      value: v.value,
+      type: v.type,
+      hasChildren: (v.variablesReference ?? 0) > 0,
+      variablesReference: v.variablesReference ?? 0,
+    }));
+    if (depth > 1) {
+      for (const v of vars) {
+        if (v.hasChildren) {
+          const children = await this.getVariables(v.variablesReference, depth - 1);
+          v.value = `${v.value} { ${children.map((c) => `${c.name}: ${c.value}`).join(", ")} }`;
+        }
+      }
+    }
+    return vars;
+  }
+
+  async evaluate(
+    expression: string,
+    frameId?: number,
+    context: "repl" | "watch" | "hover" = "repl"
+  ): Promise<{
+    result: string;
+    type?: string;
+    hasChildren: boolean;
+    variablesReference: number;
+  }> {
+    const args: Record<string, unknown> = { expression, context };
+    if (frameId !== undefined) args.frameId = frameId;
+    const response = await this.client.sendRequest("evaluate", args);
+    return {
+      result: (response.body?.result as string) ?? "",
+      type: response.body?.type as string | undefined,
+      hasChildren: ((response.body?.variablesReference as number) ?? 0) > 0,
+      variablesReference: (response.body?.variablesReference as number) ?? 0,
+    };
+  }
+
+  async collectState(
+    threadId?: number,
+    depth = 10,
+    variableDepth = 1
+  ): Promise<StoppedState> {
+    const tid = threadId ?? this.stoppedThreadId ?? 1;
+    const threads = await this.getThreads();
+    const frames = await this.getStackTrace(tid, depth);
+    const topFrame = frames[0];
+    const location = topFrame
+      ? {
+          file: topFrame.source?.path || topFrame.source?.name || "<unknown>",
+          line: topFrame.line,
+          column: topFrame.column,
+          functionName: topFrame.name,
+        }
+      : { file: "<unknown>", line: 0 };
+
+    const scopes: StoppedState["scopes"] = [];
+    if (topFrame) {
+      const rawScopes = await this.getScopes(topFrame.id);
+      for (const scope of rawScopes) {
+        const variables = await this.getVariables(scope.variablesReference, variableDepth);
+        scopes.push({ name: scope.name, variables });
+      }
+    }
+    const output = this.outputBuffer.getAll().map((e) => e.text);
+    return {
+      status: "stopped",
+      reason: this.stoppedReason || "unknown",
+      location,
+      threads: threads.map((t) => ({ id: t.id, name: t.name, stopped: t.id === tid })),
+      stackTrace: frames.map((f) => ({
+        id: f.id,
+        name: f.name,
+        file: f.source?.path || f.source?.name || "<unknown>",
+        line: f.line,
+        column: f.column,
+      })),
+      scopes,
+      output: output.length > 0 ? output : undefined,
+    };
+  }
+
+  addOutput(category: string, text: string): void {
+    this.outputBuffer.push({ category, text, timestamp: new Date().toISOString() });
+  }
+
+  getOutput(
+    category?: string,
+    clear = false
+  ): { output: OutputEntry[]; truncated: boolean } {
+    const entries = category
+      ? this.outputBuffer.getFiltered((e) => e.category === category)
+      : this.outputBuffer.getAll();
+    const truncated = this.outputBuffer.truncated;
+    if (clear) this.outputBuffer.clear();
+    return { output: entries, truncated };
+  }
+
+  async disconnect(terminateDebuggee?: boolean): Promise<void> {
+    const terminate = terminateDebuggee ?? this.launchMode === "launch";
+    try {
+      await this.client.sendRequest("disconnect", { terminateDebuggee: terminate }, 5000);
+    } catch {
+      /* Ignore — adapter may have already exited */
+    }
+    this._state = "terminated";
+    await this.client.dispose();
+  }
+
+  getLaunchConfig(): Record<string, unknown> | undefined {
+    return this.launchConfig;
+  }
+
+  getLaunchMode(): "launch" | "attach" {
+    return this.launchMode;
+  }
+
+  getAdapterConfig(): AdapterConfig {
+    return this.adapterConfig;
+  }
+
+  private handleEvent(event: DebugProtocol.Event): void {
+    switch (event.event) {
+      case "stopped":
+        this._state = "stopped";
+        this.stoppedThreadId = event.body?.threadId as number | undefined;
+        this.stoppedReason = event.body?.reason as string | undefined;
+        if (this.stoppedResolve) this.stoppedResolve(event as DebugProtocol.StoppedEvent);
+        break;
+      case "continued":
+        this._state = "running";
+        break;
+      case "output":
+        if (event.body?.output)
+          this.addOutput(
+            (event.body.category as string) || "console",
+            event.body.output as string
+          );
+        break;
+      case "terminated":
+      case "exited":
+        this._state = "terminated";
+        break;
+    }
+  }
+}
