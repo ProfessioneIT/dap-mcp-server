@@ -25,8 +25,11 @@ export class DebugSession {
   private stoppedThreadId?: number;
   private stoppedReason?: string;
   private launchConfig?: Record<string, unknown>;
+  private attachConfig?: Record<string, unknown>;
   private launchMode: "launch" | "attach" = "launch";
-  private stoppedResolve?: (event: DebugProtocol.StoppedEvent) => void;
+  private stoppedResolvers: Array<(event: DebugProtocol.StoppedEvent) => void> = [];
+  private initializedResolvers: Array<() => void> = [];
+  private _initializedReceived = false;
 
   constructor(id: string, config: AdapterConfig) {
     this.id = id;
@@ -69,11 +72,33 @@ export class DebugSession {
       });
       this.capabilities = response.body || {};
       this._state = "configuring";
+      await this.waitForInitialized(10000);
       return this.capabilities;
     } catch (err) {
       this._state = "terminated";
       throw err;
     }
+  }
+
+  async waitForInitialized(timeout = 10000): Promise<void> {
+    // If we already received the initialized event, resolve immediately
+    if (this._initializedReceived) return;
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const wrappedResolve = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const idx = this.initializedResolvers.indexOf(wrappedResolve);
+        if (idx !== -1) this.initializedResolvers.splice(idx, 1);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        // Don't reject — some adapters never send initialized; just continue
+        wrappedResolve();
+      }, timeout);
+      this.initializedResolvers.push(wrappedResolve);
+    });
   }
 
   async setBreakpoints(
@@ -117,7 +142,7 @@ export class DebugSession {
   }
 
   async attach(config: Record<string, unknown>): Promise<void> {
-    this.launchConfig = config;
+    this.attachConfig = config;
     this.launchMode = "attach";
     await this.client.sendRequest("attach", config);
     this._state = "running";
@@ -162,15 +187,23 @@ export class DebugSession {
       } as DebugProtocol.StoppedEvent;
     }
     return new Promise<DebugProtocol.StoppedEvent>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.stoppedResolve = undefined;
-        reject(new Error("timeout"));
-      }, timeout);
-      this.stoppedResolve = (event) => {
+      let settled = false;
+      const wrappedResolve = (event: DebugProtocol.StoppedEvent) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        this.stoppedResolve = undefined;
+        const idx = this.stoppedResolvers.indexOf(wrappedResolve);
+        if (idx !== -1) this.stoppedResolvers.splice(idx, 1);
         resolve(event);
       };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = this.stoppedResolvers.indexOf(wrappedResolve);
+        if (idx !== -1) this.stoppedResolvers.splice(idx, 1);
+        reject(new Error("timeout"));
+      }, timeout);
+      this.stoppedResolvers.push(wrappedResolve);
     });
   }
 
@@ -317,7 +350,13 @@ export class DebugSession {
   }
 
   getLaunchConfig(): Record<string, unknown> | undefined {
+    // Only returns a value for launched sessions, not attached
+    if (this.launchMode === "attach") return undefined;
     return this.launchConfig;
+  }
+
+  getAttachConfig(): Record<string, unknown> | undefined {
+    return this.attachConfig;
   }
 
   getLaunchMode(): "launch" | "attach" {
@@ -328,13 +367,26 @@ export class DebugSession {
     return this.adapterConfig;
   }
 
+  getBreakpoints(): Map<string, BreakpointConfig[]> {
+    return this.breakpointsMap;
+  }
+
   private handleEvent(event: DebugProtocol.Event): void {
     switch (event.event) {
+      case "initialized":
+        this._initializedReceived = true;
+        for (const resolve of this.initializedResolvers) resolve();
+        this.initializedResolvers = [];
+        break;
       case "stopped":
         this._state = "stopped";
         this.stoppedThreadId = event.body?.threadId as number | undefined;
         this.stoppedReason = event.body?.reason as string | undefined;
-        if (this.stoppedResolve) this.stoppedResolve(event as DebugProtocol.StoppedEvent);
+        {
+          const resolvers = this.stoppedResolvers;
+          this.stoppedResolvers = [];
+          for (const resolve of resolvers) resolve(event as DebugProtocol.StoppedEvent);
+        }
         break;
       case "continued":
         this._state = "running";

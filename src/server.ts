@@ -167,11 +167,8 @@ export function createServer(): McpServer {
         session = new DebugSession(id, config);
         sessions.add(session);
 
-        // Initialize
+        // Initialize (waits for the initialized event internally)
         await session.initialize();
-
-        // Brief wait for initialized event (some adapters need it)
-        await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
         // Set breakpoints grouped by file
         if (breakpoints && breakpoints.length > 0) {
@@ -292,7 +289,6 @@ export function createServer(): McpServer {
         sessions.add(session);
 
         await session.initialize();
-        await new Promise<void>((resolve) => setTimeout(resolve, 200));
         await session.configurationDone();
 
         const attachArgs: Record<string, unknown> = {
@@ -403,6 +399,7 @@ export function createServer(): McpServer {
     "Get the current state of a debug session. If stopped, returns full stack/scopes/variables. If running, returns status and buffered output.",
     {
       sessionId: z.string().optional().describe("Session ID (omit if only one session is active)"),
+      threadId: z.number().optional().describe("Thread ID (uses stopped thread if omitted)"),
       depth: z.number().optional().describe("Stack trace depth (default: 10)"),
       variableDepth: z.number().optional().describe("Variable expansion depth (default: 1)"),
       timeout: z
@@ -410,13 +407,13 @@ export function createServer(): McpServer {
         .optional()
         .describe("If running, wait up to this many milliseconds for the program to stop (default: 0 = don't wait)"),
     },
-    async ({ sessionId, depth, variableDepth, timeout }) => {
+    async ({ sessionId, threadId, depth, variableDepth, timeout }) => {
       try {
         const session = sessions.resolve(sessionId);
         const waitMs = timeout ?? 0;
 
         if (session.state === "stopped") {
-          const state = await session.collectState(undefined, depth ?? 10, variableDepth ?? 1);
+          const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1);
           return {
             content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
           };
@@ -425,7 +422,7 @@ export function createServer(): McpServer {
         if (waitMs > 0 && session.state === "running") {
           try {
             await session.waitForStopped(waitMs);
-            const state = await session.collectState(undefined, depth ?? 10, variableDepth ?? 1);
+            const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1);
             return {
               content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
             };
@@ -512,12 +509,13 @@ export function createServer(): McpServer {
       action: z
         .enum(["continue", "next", "stepIn", "stepOut", "pause"])
         .describe("Execution control action"),
+      threadId: z.number().optional().describe("Thread ID (uses stopped thread if omitted)"),
       timeout: z
         .number()
         .optional()
         .describe("Milliseconds to wait for the program to stop after the action (default: 30000)"),
     },
-    async ({ sessionId, action, timeout }) => {
+    async ({ sessionId, action, threadId, timeout }) => {
       try {
         const session = sessions.resolve(sessionId);
         const waitMs = timeout ?? 30000;
@@ -525,19 +523,19 @@ export function createServer(): McpServer {
 
         switch (action) {
           case "continue":
-            await session.continueExecution();
+            await session.continueExecution(threadId);
             break;
           case "next":
-            await session.next();
+            await session.next(threadId);
             break;
           case "stepIn":
-            await session.stepIn();
+            await session.stepIn(threadId);
             break;
           case "stepOut":
-            await session.stepOut();
+            await session.stepOut(threadId);
             break;
           case "pause":
-            await session.pause();
+            await session.pause(threadId);
             break;
         }
 
@@ -587,7 +585,7 @@ export function createServer(): McpServer {
           };
         }
 
-        const state = await session.collectState();
+        const state = await session.collectState(threadId);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
         };
@@ -679,15 +677,30 @@ export function createServer(): McpServer {
       let newSession: DebugSession | undefined;
       try {
         oldSession = sessions.resolve(sessionId);
+        const launchMode = oldSession.getLaunchMode();
+
+        if (launchMode === "attach") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Error: Cannot restart an attached session. Attached sessions cannot be restarted.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const launchConfig = oldSession.getLaunchConfig();
         const adapterConfig = oldSession.getAdapterConfig();
+        const savedBreakpoints = oldSession.getBreakpoints();
 
         if (!launchConfig) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: "Error: No launch configuration found for this session. Session may have been attached rather than launched.",
+                text: "Error: No launch configuration found for this session.",
               },
             ],
             isError: true,
@@ -703,10 +716,14 @@ export function createServer(): McpServer {
         newSession = new DebugSession(newId, adapterConfig);
         sessions.add(newSession);
 
+        // Initialize (waits for the initialized event internally)
         await newSession.initialize();
-        await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
-        // Re-apply breakpoints if stopOnEntry was set
+        // Re-apply saved breakpoints
+        for (const [file, bps] of savedBreakpoints) {
+          await newSession.setBreakpoints(file, bps);
+        }
+
         await newSession.configurationDone();
         await newSession.launch(launchConfig);
 

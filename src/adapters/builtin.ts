@@ -8,13 +8,8 @@ export const BUILTIN_ADAPTERS: AdapterConfig[] = [
     args: ["debugpy.adapter"],
     installHint: "pip install debugpy",
   },
-  {
-    type: "node",
-    runtime: "node",
-    program: "",
-    args: [],
-    installHint: "npm install -g @vscode/js-debug",
-  },
+  // node adapter removed — no reliable universal path to js-debug-dap.
+  // Configure via configure_adapter if needed.
   {
     type: "go",
     program: "dlv",
