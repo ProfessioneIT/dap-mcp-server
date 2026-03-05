@@ -291,6 +291,7 @@ export function createServer(): McpServer {
         await session.initialize();
         await session.configurationDone();
 
+        // Merge order: adapter defaults (lowest priority) < user attachConfig < explicit params (highest)
         const attachArgs: Record<string, unknown> = {
           ...config.launchDefaults,
           ...attachConfig,
@@ -520,6 +521,14 @@ export function createServer(): McpServer {
         const session = sessions.resolve(sessionId);
         const waitMs = timeout ?? 30000;
         const startTime = Date.now();
+
+        // If already stopped and asking to pause, just return current state
+        if (action === "pause" && session.state === "stopped") {
+          const state = await session.collectState(threadId);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
+          };
+        }
 
         switch (action) {
           case "continue":
@@ -768,6 +777,8 @@ export function createServer(): McpServer {
   // ────────────────────────────────────────────────────────────────────────────
   // Resource: dap://sessions
   // ────────────────────────────────────────────────────────────────────────────
+  // NOTE: This resource does not emit change notifications.
+  // Clients should poll or use get_state for up-to-date session information.
   server.resource(
     "sessions",
     "dap://sessions",

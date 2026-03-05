@@ -28,6 +28,10 @@ export class RingBuffer<T> {
     this._truncated = false;
   }
 
+  removeMatching(predicate: (item: T) => boolean): void {
+    this.buffer = this.buffer.filter((item) => !predicate(item));
+  }
+
   get size(): number {
     return this.buffer.length;
   }

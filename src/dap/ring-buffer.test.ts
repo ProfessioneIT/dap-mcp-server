@@ -48,4 +48,13 @@ describe("RingBuffer", () => {
     buf.push("b");
     expect(buf.size).toBe(2);
   });
+
+  it("removes only matching entries", () => {
+    const buf = new RingBuffer<{ cat: string; text: string }>(10);
+    buf.push({ cat: "stdout", text: "hello" });
+    buf.push({ cat: "stderr", text: "error" });
+    buf.push({ cat: "stdout", text: "world" });
+    buf.removeMatching((e) => e.cat === "stdout");
+    expect(buf.getAll()).toEqual([{ cat: "stderr", text: "error" }]);
+  });
 });

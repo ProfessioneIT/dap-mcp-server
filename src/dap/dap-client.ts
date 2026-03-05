@@ -80,9 +80,14 @@ export class DAPClient extends EventEmitter {
         this.emit("exit", code, signal);
       });
 
-      // Resolve once the process is spawned
-      this.process.stdout!.once("readable", () => resolve());
-      setTimeout(() => resolve(), 100);
+      // Resolve once the process is spawned (use flag to prevent double-resolve)
+      let resolved = false;
+      this.process.stdout!.once("readable", () => {
+        if (!resolved) { resolved = true; resolve(); }
+      });
+      setTimeout(() => {
+        if (!resolved) { resolved = true; resolve(); }
+      }, 100);
     });
   }
 

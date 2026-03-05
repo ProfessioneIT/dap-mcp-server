@@ -63,7 +63,7 @@ export interface BreakpointConfig {
 }
 
 export interface BreakpointResult {
-  id: number;
+  id?: number;
   verified: boolean;
   line: number;
   message?: string;

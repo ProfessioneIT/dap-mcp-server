@@ -117,7 +117,7 @@ export class DebugSession {
       })),
     });
     return ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
-      id: bp.id ?? 0,
+      id: bp.id,
       verified: bp.verified ?? false,
       line: bp.line ?? 0,
       message: bp.message,
@@ -334,7 +334,13 @@ export class DebugSession {
       ? this.outputBuffer.getFiltered((e) => e.category === category)
       : this.outputBuffer.getAll();
     const truncated = this.outputBuffer.truncated;
-    if (clear) this.outputBuffer.clear();
+    if (clear) {
+      if (category) {
+        this.outputBuffer.removeMatching((e) => e.category === category);
+      } else {
+        this.outputBuffer.clear();
+      }
+    }
     return { output: entries, truncated };
   }
 
