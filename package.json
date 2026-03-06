@@ -1,11 +1,26 @@
 {
-  "name": "dap-mcp-server",
+  "name": "@ivan.iraci/dap-mcp-server",
   "version": "0.1.4",
   "description": "MCP server wrapping the Debug Adapter Protocol for AI-driven debugging",
+  "keywords": [
+    "LLM",
+    "MCP",
+    "DAP"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "ssh://git@forgejo.professioneit.com/ProfessioneIT/dap-mcp-server.git"
+  },
+  "license": "MIT",
+  "author": "Ivan Iraci",
   "type": "module",
   "main": "build/index.js",
+  "types": "./build/index.d.ts",
   "bin": {
     "dap-mcp-server": "build/index.js"
+  },
+  "directories": {
+    "doc": "docs"
   },
   "scripts": {
     "build": "tsc",
@@ -15,7 +30,6 @@
     "start": "node build/index.js",
     "typecheck": "tsc --noEmit"
   },
-  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@vscode/debugprotocol": "^1.68.0",
