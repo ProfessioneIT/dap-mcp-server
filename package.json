@@ -1,6 +1,6 @@
 {
   "name": "dap-mcp-server",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "MCP server wrapping the Debug Adapter Protocol for AI-driven debugging",
   "keywords": [
     "LLM",
