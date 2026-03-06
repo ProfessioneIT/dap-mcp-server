@@ -40,6 +40,14 @@ Additional adapters (e.g. Node.js via js-debug) can be registered via the `confi
 ## Installation
 
 ```bash
+npm install -g dap-mcp-server
+```
+
+Or from source:
+
+```bash
+git clone <repo-url>
+cd dap-mcp-server
 npm install
 npm run build
 ```
@@ -52,11 +60,30 @@ Add to your MCP configuration (`~/.claude/mcp.json` or project `.mcp.json`):
 {
   "mcpServers": {
     "dap": {
-      "command": "node",
-      "args": ["/path/to/dap-mcp-server/build/index.js"]
+      "command": "npx",
+      "args": ["-y", "dap-mcp-server"]
     }
   }
 }
+```
+
+Or if installed globally:
+
+```json
+{
+  "mcpServers": {
+    "dap": {
+      "command": "dap-mcp-server"
+    }
+  }
+}
+```
+
+A `SKILL.md` file is included in the package. Copy it to `.claude/skills/` in your project to teach Claude Code when and how to use the debugger:
+
+```bash
+mkdir -p .claude/skills
+cp node_modules/dap-mcp-server/SKILL.md .claude/skills/dap-debugging.md
 ```
 
 ## Design
