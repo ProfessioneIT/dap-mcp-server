@@ -35,7 +35,7 @@
     "@vscode/debugprotocol": "^1.68.0"
   },
   "peerDependencies": {
-    "zod": "^3.25 || ^4.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
