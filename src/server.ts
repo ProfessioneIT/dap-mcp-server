@@ -20,10 +20,47 @@ export function createServer(): McpServer {
     console.error("Warning: failed to load adapter configs:", err);
   });
 
-  const server = new McpServer({
-    name: "dap-mcp-server",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    {
+      name: "dap-mcp-server",
+      version: "0.1.0",
+    },
+    {
+      instructions: [
+        "This server provides AI-driven debugging via the Debug Adapter Protocol (DAP).",
+        "",
+        "## Debugging Workflow",
+        "",
+        "A typical session follows this sequence:",
+        "1. `list_adapters` — discover available debug adapters and check which are installed",
+        "2. `debug_launch` (or `debug_attach`) — start a debug session. This performs the full DAP handshake,",
+        "   sets initial breakpoints, and launches the program. Returns a sessionId and initial stopped state.",
+        "3. Inspect state with `get_state` — returns threads, call stack, scopes, and variables in one call.",
+        "   This is a coarse-grained tool designed to minimize round-trips; prefer it over multiple fine-grained queries.",
+        "4. `step` — control execution (continue, next, stepIn, stepOut, pause). Each step action blocks until",
+        "   the program stops again and returns the new state, so you do NOT need to call get_state after stepping.",
+        "5. `evaluate` — evaluate expressions in the context of a stopped frame (REPL, watch, or hover context).",
+        "6. `set_breakpoints` / `set_exception_breakpoints` — modify breakpoints during the session.",
+        "7. `get_output` — retrieve buffered stdout/stderr/console output (ring buffer, max 10K lines).",
+        "8. `debug_disconnect` — end the session. `debug_restart` replays the same launch config with preserved breakpoints.",
+        "",
+        "## Key Conventions",
+        "",
+        "- **Auto-session resolution**: All tools accept an optional `sessionId`. When only one session is active,",
+        "  you can omit it — the server resolves it automatically.",
+        "- **Synchronous stepping**: `step` returns the new stopped state directly. Do not follow a step with get_state",
+        "  unless you need to change parameters like `variableDepth` or `threadId`.",
+        "- **Coarse get_state**: Fetches threads + stack frames + scopes + variables in a single call.",
+        "  Use `depth` (default 10) and `variableDepth` (default 1) to control how much data is returned.",
+        "- **Output buffering**: Program output is buffered in a 10K-line ring buffer. Oldest lines are dropped",
+        "  when the buffer is full. Use `get_output` with `clear: true` to consume and free buffer space.",
+        "- **Adapter registration**: Use `configure_adapter` to register adapters. Configs are persisted to",
+        "  `~/.dap-mcp/adapters.json` (global) or `./.dap-mcp/adapters.json` (project), with project overriding global.",
+        "- **Error handling**: All tool errors are returned as `isError: true` results with an error message.",
+        "  The session remains usable after most errors.",
+      ].join("\n"),
+    }
+  );
 
   // ────────────────────────────────────────────────────────────────────────────
   // 1. list_adapters
