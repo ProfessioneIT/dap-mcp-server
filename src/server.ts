@@ -229,6 +229,20 @@ export function createServer(): McpServer {
         // Initialize (waits for the initialized event internally)
         await session.initialize();
 
+        // Build launch request
+        const launchArgs: Record<string, unknown> = {
+          ...config.launchDefaults,
+          program,
+          stopOnEntry: shouldStop,
+        };
+        if (args !== undefined) launchArgs.args = args;
+        if (cwd !== undefined) launchArgs.cwd = cwd;
+        if (env !== undefined) launchArgs.env = env;
+
+        // Send launch first (don't await — real adapters like debugpy block
+        // the launch response until configurationDone arrives)
+        const launchPromise = session.launch(launchArgs);
+
         // Set breakpoints grouped by file
         if (breakpoints && breakpoints.length > 0) {
           const byFile = new Map<string, typeof breakpoints>();
@@ -255,20 +269,11 @@ export function createServer(): McpServer {
           await session.setExceptionBreakpoints(exceptionBreakpoints);
         }
 
-        // Configuration done
+        // Configuration done — signals the adapter to proceed with launch
         await session.configurationDone();
 
-        // Build launch request
-        const launchArgs: Record<string, unknown> = {
-          ...config.launchDefaults,
-          program,
-          stopOnEntry: shouldStop,
-        };
-        if (args !== undefined) launchArgs.args = args;
-        if (cwd !== undefined) launchArgs.cwd = cwd;
-        if (env !== undefined) launchArgs.env = env;
-
-        await session.launch(launchArgs);
+        // Now await the launch response
+        await launchPromise;
 
         let stateData: Record<string, unknown>;
         if (shouldStop) {
@@ -348,7 +353,6 @@ export function createServer(): McpServer {
         sessions.add(session);
 
         await session.initialize();
-        await session.configurationDone();
 
         // Merge order: adapter defaults (lowest priority) < user attachConfig < explicit params (highest)
         const attachArgs: Record<string, unknown> = {
@@ -359,7 +363,10 @@ export function createServer(): McpServer {
         if (host !== undefined) attachArgs.host = host;
         if (processId !== undefined) attachArgs.processId = processId;
 
-        await session.attach(attachArgs);
+        // Send attach first (don't await — real adapters block until configurationDone)
+        const attachPromise = session.attach(attachArgs);
+        await session.configurationDone();
+        await attachPromise;
 
         return {
           content: [
@@ -787,13 +794,16 @@ export function createServer(): McpServer {
         // Initialize (waits for the initialized event internally)
         await newSession.initialize();
 
+        // Send launch first (don't await — real adapters block until configurationDone)
+        const launchPromise = newSession.launch(launchConfig);
+
         // Re-apply saved breakpoints
         for (const [file, bps] of savedBreakpoints) {
           await newSession.setBreakpoints(file, bps);
         }
 
         await newSession.configurationDone();
-        await newSession.launch(launchConfig);
+        await launchPromise;
 
         const stopOnEntry = launchConfig.stopOnEntry !== false;
         let stateData: Record<string, unknown>;

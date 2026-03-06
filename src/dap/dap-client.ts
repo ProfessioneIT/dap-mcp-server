@@ -66,7 +66,12 @@ export class DAPClient extends EventEmitter {
 
       this.process = spawn(cmd, runtimeArgs, {
         stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
       });
+
+      // Detached child must be unref'd so the parent Node process can exit
+      // even if the adapter is still running (cleanup happens via dispose()).
+      this.process.unref();
 
       this.parser = new MessageParser((msg) => this.handleMessage(msg));
 
@@ -180,6 +185,23 @@ export class DAPClient extends EventEmitter {
             )
           );
         }
+      }
+    } else if (msg.type === "request") {
+      // Reverse request from the adapter (e.g. runInTerminal).
+      // We reject all reverse requests — the MCP server has no terminal.
+      const req = msg as DebugProtocol.Request;
+      const errorResponse: DebugProtocol.Response = {
+        seq: this.seq++,
+        type: "response",
+        request_seq: req.seq,
+        command: req.command,
+        success: false,
+        message: `Reverse request '${req.command}' is not supported by this client`,
+      };
+      try {
+        this.process?.stdin?.write(encodeMessage(errorResponse));
+      } catch {
+        // ignore — process may have exited
       }
     } else if (msg.type === "event") {
       const event = msg as DebugProtocol.Event;

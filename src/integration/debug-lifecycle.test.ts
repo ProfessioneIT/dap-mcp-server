@@ -46,14 +46,17 @@ describe("Debug Lifecycle Integration", () => {
     expect(caps.supportsConfigurationDoneRequest).toBe(true);
     expect(session.state).toBe("configuring");
 
-    // Set breakpoints
+    // Send launch first (don't await — real adapters block until configurationDone)
+    const launchPromise = session.launch({ program: "/test/app.py", stopOnEntry: true });
+
+    // Set breakpoints while launch is pending
     const bps = await session.setBreakpoints("/test/app.py", [{ line: 5 }, { line: 10 }]);
     expect(bps).toHaveLength(2);
     expect(bps[0].verified).toBe(true);
 
-    // Configuration done + launch
+    // Configuration done + await launch
     await session.configurationDone();
-    await session.launch({ program: "/test/app.py", stopOnEntry: true });
+    await launchPromise;
 
     // Wait for stopped on entry
     const stoppedEvent = await session.waitForStopped(5000);

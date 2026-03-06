@@ -28,6 +28,9 @@ export const BUILTIN_ADAPTERS: AdapterConfig[] = [
     runtime: "python3",
     program: "-m",
     args: ["debugpy.adapter"],
+    launchDefaults: {
+      console: "internalConsole",
+    },
     installHint: "pip install debugpy",
   },
   // node adapter removed — no reliable universal path to js-debug-dap.
