@@ -12,7 +12,8 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
+    "typecheck": "tsc --noEmit"
   },
   "license": "MIT",
   "dependencies": {
