@@ -1,5 +1,5 @@
 {
-  "name": "@ivan.iraci/dap-mcp-server",
+  "name": "dap-mcp-server",
   "version": "0.1.5",
   "description": "MCP server wrapping the Debug Adapter Protocol for AI-driven debugging",
   "keywords": [

@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MCP server wrapping the Debug Adapter Protocol (DAP) for AI agent-driven debugging. TypeScript, Node.js, ESM modules.
+MCP server wrapping the Debug Adapter Protocol (DAP) for AI agent-driven debugging. TypeScript, Node.js, ESM modules. Published to npm as `dap-mcp-server`.
 
 ## Commands
 
 ```bash
 npm run build          # TypeScript compilation → build/
+npm run typecheck      # Type-check without emitting (tsc --noEmit)
 npm test               # vitest run (all tests)
 npm run test:watch     # vitest in watch mode
 npm run dev            # tsc --watch
@@ -43,6 +44,7 @@ Events flow the reverse direction: adapter emits events → `DAPClient` re-emits
 - All tool execution errors use `isError: true` in MCP results, not JSON-RPC protocol errors
 - Types from `@vscode/debugprotocol` for DAP message types
 - Internal/MCP-facing types in `src/dap/types.ts`
+- All source files carry an MIT license header comment — preserve it when creating new files
 
 ## Testing
 
@@ -58,6 +60,10 @@ Events flow the reverse direction: adapter emits events → `DAPClient` re-emits
 3. **Auto-session resolution**: `sessionId` optional when single session active
 4. **Output ring buffer**: 10K lines max, oldest dropped
 5. **Own DAP client**: Custom implementation (not `@vscode/debugadapter-testsupport`) for full control over event buffering and crash detection
+
+## CI/CD
+
+Forgejo Actions workflow (`.forgejo/workflows/publish.yml`) runs on push to `main`: tests → typecheck → build → bump patch version → publish to npm. Version bumps are auto-committed with `[skip ci]`.
 
 ## Design Documents
 
