@@ -80,8 +80,16 @@ export async function runDebugRun(
     if (opts.args !== undefined) launchArgs.args = opts.args;
     if (opts.cwd !== undefined) launchArgs.cwd = opts.cwd;
     if (opts.env !== undefined) launchArgs.env = opts.env;
+    // delve: mirror cwd → dlvCwd so `go build` finds go.mod from the right dir.
+    if (config.type === "go" && opts.cwd !== undefined && launchArgs.dlvCwd === undefined) {
+      launchArgs.dlvCwd = opts.cwd;
+    }
 
     const launchPromise = session.launch(launchArgs);
+    // Suppress unhandled rejection: the real `await launchPromise` below will
+    // still throw if launch fails.
+    launchPromise.catch(() => { /* handled at await */ });
+    await session.waitForInitialized(10000);
 
     if (opts.logpoints && opts.logpoints.length > 0) {
       const byFile = new Map<string, Array<{ line: number; logMessage: string }>>();

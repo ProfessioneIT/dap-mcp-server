@@ -43,8 +43,9 @@ describe("AdapterRegistry", () => {
     const adapters = registry.listAll();
     expect(adapters.some((a) => a.type === "python")).toBe(true);
     expect(adapters.some((a) => a.type === "go")).toBe(true);
-    // node adapter removed — no reliable universal path; configure via configure_adapter
-    expect(adapters.some((a) => a.type === "node")).toBe(false);
+    // node adapter now points at vscode-js-debug's dapDebugServer.js via TCP.
+    // The user must install/configure it; the registry just publishes the entry.
+    expect(adapters.some((a) => a.type === "node")).toBe(true);
   });
 
   it("registers a custom adapter", () => {

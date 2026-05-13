@@ -84,4 +84,35 @@ describe("DAPClient", () => {
       client.sendRequest("initialize", { adapterID: "test" }, 500)
     ).rejects.toThrow(/timeout/i);
   });
+
+  it("speaks DAP over TCP when configured", async () => {
+    client = new DAPClient(
+      "node",
+      path.join(__dirname, "../test-fixtures/tcp-mock-adapter.js"),
+      [],
+      {
+        transport: "tcp",
+        portMatcher: "DAP server listening at:\\s*\\S+:(\\d+)",
+        tcpConnectTimeout: 3000,
+      }
+    );
+    await client.spawn();
+    const response = await client.sendRequest("initialize", {
+      adapterID: "test",
+      linesStartAt1: true,
+      columnsStartAt1: true,
+      pathFormat: "path",
+    });
+    expect(response.success).toBe(true);
+    expect(response.command).toBe("initialize");
+  });
+
+  it("rejects TCP transport without a portMatcher", () => {
+    expect(
+      () =>
+        new DAPClient("node", "irrelevant.js", [], {
+          transport: "tcp",
+        })
+    ).toThrow(DAPClientError);
+  });
 });

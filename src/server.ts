@@ -223,6 +223,8 @@ export function createServer(): McpServer {
           args: z.array(z.string()).optional(),
           launchDefaults: z.record(z.string(), z.unknown()).optional(),
           installHint: z.string().optional(),
+          transport: z.enum(["stdio", "tcp"]).optional(),
+          portMatcher: z.string().optional(),
         })
         .optional()
         .describe("Override adapter config inline instead of looking up from registry"),
@@ -276,9 +278,27 @@ export function createServer(): McpServer {
         if (cwd !== undefined) launchArgs.cwd = cwd;
         if (env !== undefined) launchArgs.env = env;
 
+        // Adapter-specific arg normalization. delve's `cwd` is the debuggee's
+        // working directory; the *build* (go build) runs from delve's own
+        // process cwd, controlled by `dlvCwd`. Mirror cwd → dlvCwd so a
+        // user-supplied cwd is found by `go build` looking for go.mod.
+        if (config.type === "go" && cwd !== undefined && launchArgs.dlvCwd === undefined) {
+          launchArgs.dlvCwd = cwd;
+        }
+
         // Send launch first (don't await — real adapters like debugpy block
         // the launch response until configurationDone arrives)
         const launchPromise = session.launch(launchArgs);
+        // Suppress unhandled rejection: the real `await launchPromise` below
+        // will still throw if launch fails. Without this, an early launch
+        // rejection (e.g. adapter rejects the request) crashes the MCP server.
+        launchPromise.catch(() => { /* handled at await */ });
+
+        // Wait for the adapter to emit the "initialized" event before sending
+        // configuration requests. Some adapters (delve) emit it right after the
+        // initialize response; others (debugpy) only emit it after receiving
+        // launch — that's why we fire launch first and wait for initialized here.
+        await session.waitForInitialized(10000);
 
         // Set breakpoints grouped by file
         if (breakpoints && breakpoints.length > 0) {
@@ -365,6 +385,8 @@ export function createServer(): McpServer {
           args: z.array(z.string()).optional(),
           launchDefaults: z.record(z.string(), z.unknown()).optional(),
           installHint: z.string().optional(),
+          transport: z.enum(["stdio", "tcp"]).optional(),
+          portMatcher: z.string().optional(),
         })
         .optional()
         .describe("Override adapter config inline"),
@@ -402,6 +424,10 @@ export function createServer(): McpServer {
 
         // Send attach first (don't await — real adapters block until configurationDone)
         const attachPromise = session.attach(attachArgs);
+        // Suppress unhandled rejection: the real `await attachPromise` below
+        // will still throw if attach fails.
+        attachPromise.catch(() => { /* handled at await */ });
+        await session.waitForInitialized(10000);
         await session.configurationDone();
         await attachPromise;
 
@@ -839,6 +865,10 @@ export function createServer(): McpServer {
 
         // Send launch first (don't await — real adapters block until configurationDone)
         const launchPromise = newSession.launch(launchConfig);
+        // Suppress unhandled rejection: the real `await launchPromise` below
+        // will still throw if launch fails.
+        launchPromise.catch(() => { /* handled at await */ });
+        await newSession.waitForInitialized(10000);
 
         // Re-apply saved breakpoints
         for (const [file, bps] of savedBreakpoints) {
@@ -922,6 +952,8 @@ export function createServer(): McpServer {
           args: z.array(z.string()).optional(),
           launchDefaults: z.record(z.string(), z.unknown()).optional(),
           installHint: z.string().optional(),
+          transport: z.enum(["stdio", "tcp"]).optional(),
+          portMatcher: z.string().optional(),
         })
         .optional()
         .describe("Override adapter config inline"),
@@ -1010,6 +1042,8 @@ export function createServer(): McpServer {
           args: z.array(z.string()).optional(),
           launchDefaults: z.record(z.string(), z.unknown()).optional(),
           installHint: z.string().optional(),
+          transport: z.enum(["stdio", "tcp"]).optional(),
+          portMatcher: z.string().optional(),
         })
         .optional()
         .describe("Override adapter config inline"),

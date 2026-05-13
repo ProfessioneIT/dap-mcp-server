@@ -33,13 +33,38 @@ export const BUILTIN_ADAPTERS: AdapterConfig[] = [
     },
     installHint: "pip install debugpy",
   },
-  // node adapter removed — no reliable universal path to js-debug-dap.
-  // Configure via configure_adapter if needed.
   {
     type: "go",
     program: "dlv",
-    args: ["dap"],
+    args: ["dap", "--listen=127.0.0.1:0"],
+    transport: "tcp",
+    // Matches: "DAP server listening at: 127.0.0.1:38251"
+    portMatcher: "DAP server listening at:\\s*\\S+:(\\d+)",
     installHint: "go install github.com/go-delve/delve/cmd/dlv@latest",
+  },
+  // node adapter: vscode-js-debug's dapDebugServer.js. The user must install
+  // it (no universal path); the registry's availability check will mark this
+  // unavailable when the program is missing.
+  {
+    type: "node",
+    runtime: "node",
+    program: "dapDebugServer.js",
+    // Bind to IPv4 explicitly; the default is IPv6 ('::1') which our client
+    // (which connects to 127.0.0.1) can't reach on systems without v4↔v6
+    // bridging.
+    args: ["0", "127.0.0.1"],
+    transport: "tcp",
+    // Matches: "Debug server listening at 127.0.0.1:38251" (vscode-js-debug)
+    portMatcher: "[Ll]istening at\\s*\\S*?:(\\d+)",
+    // vscode-js-debug requires these in the launch request; pwa-node is the
+    // "production worker agent" Node launcher.
+    launchDefaults: {
+      type: "pwa-node",
+      request: "launch",
+    },
+    installHint:
+      "Install vscode-js-debug DAP server and set the adapter's `program` to its dapDebugServer.js path " +
+      "(e.g. via `configure_adapter`). See https://github.com/microsoft/vscode-js-debug.",
   },
   {
     type: "cppdbg",

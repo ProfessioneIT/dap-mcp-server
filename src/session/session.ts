@@ -62,7 +62,10 @@ export class DebugSession {
     const runtime = config.runtime || "";
     const program = config.program;
     const args = config.args || [];
-    this.client = new DAPClient(runtime, program, args);
+    this.client = new DAPClient(runtime, program, args, {
+      transport: config.transport,
+      portMatcher: config.portMatcher,
+    });
 
     this.client.on("event", (event: DebugProtocol.Event) => {
       this.handleEvent(event);
@@ -104,7 +107,12 @@ export class DebugSession {
       });
       this.capabilities = response.body || {};
       this._state = "configuring";
-      await this.waitForInitialized(10000);
+      // Note: per DAP spec, the "initialized" event signals the adapter is
+      // ready for configuration (setBreakpoints, etc.). Different adapters
+      // emit it at different times: delve emits it immediately after the
+      // initialize response, but debugpy only emits it after `launch` is
+      // received. The orchestrator (server.ts) is responsible for waiting
+      // for it AFTER firing the launch/attach request — see waitForInitialized.
       return this.capabilities;
     } catch (err) {
       this._state = "terminated";

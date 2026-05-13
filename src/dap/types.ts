@@ -73,6 +73,23 @@ export interface AdapterConfig {
   args?: string[];
   launchDefaults?: Record<string, unknown>;
   installHint?: string;
+  /**
+   * Transport mode for the adapter:
+   * - "stdio" (default): DAP messages flow over the adapter's stdin/stdout.
+   * - "tcp": the adapter is a TCP DAP server. After spawning, the client reads
+   *   the listening address from the adapter's stdout (matched with
+   *   `portMatcher`) and connects to it via a TCP socket. DAP messages then
+   *   flow over that socket. Use this for adapters like `dlv dap` or
+   *   vscode-js-debug's `dapDebugServer.js` that don't speak DAP on stdio.
+   */
+  transport?: "stdio" | "tcp";
+  /**
+   * Regular expression with a single capture group that yields the TCP port the
+   * adapter is listening on. Matched against the adapter's stdout output.
+   * Required (and only used) when `transport` is "tcp".
+   * Example for delve: "DAP server listening at:\\s*\\S+:(\\d+)"
+   */
+  portMatcher?: string;
 }
 
 export interface OutputEntry {
