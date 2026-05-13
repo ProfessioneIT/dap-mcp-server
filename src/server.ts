@@ -24,11 +24,27 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import os from "node:os";
 import path from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { AdapterRegistry } from "./adapters/registry.js";
 import { SessionManager } from "./session/session-manager.js";
 import { DebugSession } from "./session/session.js";
+import { runDebugInspect } from "./session/inspect.js";
+import { runDebugRun } from "./session/run.js";
 import { checkAdapterAvailable } from "./adapters/detect.js";
+
+function readPackageVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      readFileSync(path.join(here, "..", "package.json"), "utf-8")
+    ) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
 
 export function createServer(): McpServer {
   const globalDir = path.join(os.homedir(), ".dap-mcp");
@@ -45,41 +61,44 @@ export function createServer(): McpServer {
   const server = new McpServer(
     {
       name: "dap-mcp-server",
-      version: "0.1.0",
+      version: readPackageVersion(),
     },
     {
       instructions: [
         "This server provides AI-driven debugging via the Debug Adapter Protocol (DAP).",
         "",
-        "## Debugging Workflow",
+        "## When to use which tool",
         "",
-        "A typical session follows this sequence:",
-        "1. `list_adapters` — discover available debug adapters and check which are installed",
-        "2. `debug_launch` (or `debug_attach`) — start a debug session. This performs the full DAP handshake,",
-        "   sets initial breakpoints, and launches the program. Returns a sessionId and initial stopped state.",
-        "3. Inspect state with `get_state` — returns threads, call stack, scopes, and variables in one call.",
-        "   This is a coarse-grained tool designed to minimize round-trips; prefer it over multiple fine-grained queries.",
-        "4. `step` — control execution (continue, next, stepIn, stepOut, pause). Each step action blocks until",
-        "   the program stops again and returns the new state, so you do NOT need to call get_state after stepping.",
-        "5. `evaluate` — evaluate expressions in the context of a stopped frame (REPL, watch, or hover context).",
-        "6. `set_breakpoints` / `set_exception_breakpoints` — modify breakpoints during the session.",
-        "7. `get_output` — retrieve buffered stdout/stderr/console output (ring buffer, max 10K lines).",
-        "8. `debug_disconnect` — end the session. `debug_restart` replays the same launch config with preserved breakpoints.",
+        "- **`debug_inspect`** — One-shot 'what is X at line N?'. Launches, hits a breakpoint, evaluates expressions,",
+        "  disconnects. Use this first; it collapses a multi-call workflow into a single call.",
+        "- **`debug_run`** — Run a program with no stops and collect all output. Combine with `logpoints` (breakpoints",
+        "  with `logMessage`) for printf-style debugging without modifying source.",
+        "- **`debug_launch` + step/evaluate** — Interactive multi-step session when you need to explore.",
+        "",
+        "## Interactive Debugging Workflow",
+        "",
+        "1. `list_adapters` — discover available adapters; the response includes a summary and install hints.",
+        "2. `debug_launch` (or `debug_attach`) — start a session. With breakpoints provided, `stopOnEntry` defaults",
+        "   to false so the program runs to the first breakpoint. Returns sessionId + initial stopped state.",
+        "3. Inspect state with `get_state` — threads + call stack + scopes + variables in one call.",
+        "4. `step` — continue, next, stepIn, stepOut, pause. Blocks until stopped; returns new state directly.",
+        "5. `evaluate` — expressions in the context of a stopped frame.",
+        "6. `set_breakpoints` / `set_exception_breakpoints` — modify breakpoints mid-session. Use `logMessage`",
+        "   on a breakpoint to make it a logpoint (emits formatted text without pausing).",
+        "7. `list_breakpoints` — see what's currently set.",
+        "8. `get_output` — retrieve stdout/stderr/console output (10K-line ring buffer).",
+        "9. `debug_disconnect` — end. `debug_restart` replays the launch config with preserved breakpoints.",
         "",
         "## Key Conventions",
         "",
-        "- **Auto-session resolution**: All tools accept an optional `sessionId`. When only one session is active,",
-        "  you can omit it — the server resolves it automatically.",
-        "- **Synchronous stepping**: `step` returns the new stopped state directly. Do not follow a step with get_state",
-        "  unless you need to change parameters like `variableDepth` or `threadId`.",
-        "- **Coarse get_state**: Fetches threads + stack frames + scopes + variables in a single call.",
-        "  Use `depth` (default 10) and `variableDepth` (default 1) to control how much data is returned.",
-        "- **Output buffering**: Program output is buffered in a 10K-line ring buffer. Oldest lines are dropped",
-        "  when the buffer is full. Use `get_output` with `clear: true` to consume and free buffer space.",
-        "- **Adapter registration**: Use `configure_adapter` to register adapters. Configs are persisted to",
-        "  `~/.dap-mcp/adapters.json` (global) or `./.dap-mcp/adapters.json` (project), with project overriding global.",
-        "- **Error handling**: All tool errors are returned as `isError: true` results with an error message.",
-        "  The session remains usable after most errors.",
+        "- **Auto-session resolution**: tools accept an optional `sessionId`; with one active session, omit it.",
+        "- **Synchronous stepping**: `step` returns the new stopped state. Don't follow it with `get_state`.",
+        "- **Variable depth**: `get_state` accepts `variableDepth` (default 1). With `> 1`, container variables",
+        "  expose their entries as a structured `children` array.",
+        "- **stopOnEntry default**: false when `debug_launch` is given breakpoints, true otherwise.",
+        "- **Adapter registration**: `configure_adapter` persists to `~/.dap-mcp/adapters.json` (global) or",
+        "  `./.dap-mcp/adapters.json` (project); project overrides global.",
+        "- **Error handling**: tool errors return `isError: true`. The session usually remains usable.",
       ].join("\n"),
     }
   );
@@ -89,7 +108,7 @@ export function createServer(): McpServer {
   // ────────────────────────────────────────────────────────────────────────────
   server.tool(
     "list_adapters",
-    "List all known debug adapters with their availability status on this machine.",
+    "List all known debug adapters with their availability status on this machine. Returns a summary line, the full adapter list, and a separate 'missing' list with installation hints for adapters that aren't installed.",
     {},
     async () => {
       try {
@@ -101,8 +120,21 @@ export function createServer(): McpServer {
             return { ...a, available };
           })
         );
+        const available = results.filter((r) => r.available);
+        const missing = results
+          .filter((r) => !r.available)
+          .map((r) => ({ type: r.type, installHint: r.installHint }));
+        const summary =
+          missing.length === 0
+            ? `${available.length}/${results.length} adapters available`
+            : `${available.length}/${results.length} adapters available; missing: ${missing.map((m) => m.type).join(", ")}`;
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ summary, adapters: results, missing }, null, 2),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -163,7 +195,10 @@ export function createServer(): McpServer {
       args: z.array(z.string()).optional().describe("Program arguments"),
       cwd: z.string().optional().describe("Working directory for the program"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables"),
-      stopOnEntry: z.boolean().optional().describe("Stop on program entry (default: true)"),
+      stopOnEntry: z
+        .boolean()
+        .optional()
+        .describe("Stop on program entry. Defaults to false when breakpoints are provided (run to first breakpoint), true otherwise."),
       breakpoints: z
         .array(
           z.object({
@@ -203,7 +238,9 @@ export function createServer(): McpServer {
       exceptionBreakpoints,
       adapterConfig,
     }) => {
-      const shouldStop = stopOnEntry !== false;
+      // Default: if breakpoints are provided, run to the first one; otherwise stop at entry.
+      const shouldStop =
+        stopOnEntry ?? !(breakpoints !== undefined && breakpoints.length > 0);
       let session: DebugSession | undefined;
       try {
         const config =
@@ -546,7 +583,7 @@ export function createServer(): McpServer {
             content: [
               {
                 type: "text" as const,
-                text: `Error: Session is not stopped (current state: ${session.state}). Use 'step' with action 'pause' to stop first.`,
+                text: `Error: Session is not stopped (current state: ${session.state}). Expressions can only be evaluated at a stopped frame. Set a breakpoint where you want to inspect (set_breakpoints) and continue to it (step with action 'continue'), then retry.`,
               },
             ],
             isError: true,
@@ -678,7 +715,7 @@ export function createServer(): McpServer {
   // ────────────────────────────────────────────────────────────────────────────
   server.tool(
     "get_output",
-    "Get buffered stdout/stderr and debug adapter output for a session.",
+    "Get buffered stdout/stderr and debug adapter output for a session. Pass `since` (the `nextSince` from a previous call) to get only newly-emitted entries — useful for polling logpoint output without re-reading the full buffer.",
     {
       sessionId: z.string().optional().describe("Session ID (omit if only one session is active)"),
       category: z
@@ -686,11 +723,17 @@ export function createServer(): McpServer {
         .optional()
         .describe("Filter by output category: 'stdout', 'stderr', 'console', etc."),
       clear: z.boolean().optional().describe("Clear the output buffer after reading (default: false)"),
+      since: z
+        .number()
+        .optional()
+        .describe(
+          "Return only entries with seq > since. Pass the `nextSince` value from a prior call to fetch incremental output."
+        ),
     },
-    async ({ sessionId, category, clear }) => {
+    async ({ sessionId, category, clear, since }) => {
       try {
         const session = sessions.resolve(sessionId);
-        const result = session.getOutput(category, clear ?? false);
+        const result = session.getOutput(category, clear ?? false, since);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -835,6 +878,149 @@ export function createServer(): McpServer {
           sessions.remove(newSession.id);
           newSession.disconnect().catch(() => undefined);
         }
+        return {
+          content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // 13. debug_inspect
+  // ────────────────────────────────────────────────────────────────────────────
+  server.tool(
+    "debug_inspect",
+    "One-shot inspection: launch a program, run to a breakpoint, evaluate a list of expressions in that frame, then disconnect. Collapses launch + wait + evaluate + disconnect into a single call. Use for 'what is X at line N?' debugging.",
+    {
+      adapter: z.string().describe("Adapter type to use (e.g. 'python', 'node')"),
+      program: z.string().describe("Path to the program to debug"),
+      args: z.array(z.string()).optional().describe("Program arguments"),
+      cwd: z.string().optional().describe("Working directory for the program"),
+      env: z.record(z.string(), z.string()).optional().describe("Environment variables"),
+      at: z
+        .object({
+          file: z.string().describe("Absolute path to the source file"),
+          line: z.number().describe("Line number (1-based)"),
+          condition: z.string().optional().describe("Conditional breakpoint expression"),
+          hitCondition: z.string().optional().describe("Hit-count condition (e.g. '5' for 5th hit)"),
+        })
+        .describe("Breakpoint location to stop at"),
+      expressions: z
+        .array(z.string())
+        .optional()
+        .describe("Expressions to evaluate when stopped at the breakpoint. Omit to just verify the line is reached."),
+      timeout: z
+        .number()
+        .optional()
+        .describe("Milliseconds to wait for the breakpoint to be hit (default: 30000)"),
+      adapterConfig: z
+        .object({
+          type: z.string(),
+          program: z.string(),
+          runtime: z.string().optional(),
+          args: z.array(z.string()).optional(),
+          launchDefaults: z.record(z.string(), z.unknown()).optional(),
+          installHint: z.string().optional(),
+        })
+        .optional()
+        .describe("Override adapter config inline"),
+    },
+    async (opts) => {
+      try {
+        const result = await runDebugInspect(registry, sessions, opts);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // 14. list_breakpoints
+  // ────────────────────────────────────────────────────────────────────────────
+  server.tool(
+    "list_breakpoints",
+    "List the breakpoints currently registered with a session, grouped by source file. Includes regular breakpoints, conditional breakpoints, and logpoints.",
+    {
+      sessionId: z.string().optional().describe("Session ID (omit if only one session is active)"),
+    },
+    async ({ sessionId }) => {
+      try {
+        const session = sessions.resolve(sessionId);
+        const bps = session.getBreakpoints();
+        const files = Array.from(bps.entries()).map(([file, breakpoints]) => ({
+          file,
+          breakpoints,
+        }));
+        const totalCount = files.reduce((n, f) => n + f.breakpoints.length, 0);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ count: totalCount, files }, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // 15. debug_run
+  // ────────────────────────────────────────────────────────────────────────────
+  server.tool(
+    "debug_run",
+    "Launch a program with no stops, let it run to completion, and return all stdout/stderr/console output. Optionally inject logpoints (breakpoints with logMessage) for printf-style debugging without modifying source. Use for 'what does this script actually do?' cases where you don't need to inspect intermediate state.",
+    {
+      adapter: z.string().describe("Adapter type to use (e.g. 'python', 'node')"),
+      program: z.string().describe("Path to the program to debug"),
+      args: z.array(z.string()).optional().describe("Program arguments"),
+      cwd: z.string().optional().describe("Working directory for the program"),
+      env: z.record(z.string(), z.string()).optional().describe("Environment variables"),
+      logpoints: z
+        .array(
+          z.object({
+            file: z.string().describe("Absolute path to the source file"),
+            line: z.number().describe("Line number (1-based)"),
+            logMessage: z.string().describe("Message template; expressions in {braces} are evaluated in scope"),
+          })
+        )
+        .optional()
+        .describe("Logpoints to emit per-hit messages without pausing execution"),
+      timeout: z
+        .number()
+        .optional()
+        .describe("Total wall-clock timeout for the whole run in milliseconds (default: 60000)"),
+      adapterConfig: z
+        .object({
+          type: z.string(),
+          program: z.string(),
+          runtime: z.string().optional(),
+          args: z.array(z.string()).optional(),
+          launchDefaults: z.record(z.string(), z.unknown()).optional(),
+          installHint: z.string().optional(),
+        })
+        .optional()
+        .describe("Override adapter config inline"),
+    },
+    async (opts) => {
+      try {
+        const result = await runDebugRun(registry, sessions, opts);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (err) {
         return {
           content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
           isError: true,

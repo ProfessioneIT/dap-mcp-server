@@ -52,6 +52,8 @@ function send(msg) {
 
 let seq = 1;
 let currentLine = 1;
+let breakpointCount = 0;
+let stopOnEntry = false;
 
 function handleMessage(msg) {
   if (msg.type !== "request") return;
@@ -62,6 +64,7 @@ function handleMessage(msg) {
       send({ seq: seq++, type: "event", event: "initialized", body: {} });
       break;
     case "setBreakpoints":
+      breakpointCount += (msg.arguments.breakpoints || []).length;
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "setBreakpoints", success: true,
         body: { breakpoints: (msg.arguments.breakpoints || []).map((bp, i) => ({ id: i+1, verified: true, line: bp.line })) } });
       break;
@@ -70,12 +73,24 @@ function handleMessage(msg) {
       break;
     case "configurationDone":
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "configurationDone", success: true, body: {} });
+      // Real-adapter behavior: after configurationDone, if launch was non-stopOnEntry
+      // and breakpoints were set, the program runs and hits the first breakpoint.
+      if (!stopOnEntry && breakpointCount > 0) {
+        setTimeout(() => { send({ seq: seq++, type: "event", event: "stopped", body: { reason: "breakpoint", threadId: 1, allThreadsStopped: true } }); }, 50);
+      } else if (!stopOnEntry && breakpointCount === 0) {
+        // No breakpoints, no stop-on-entry: program runs to completion and terminates.
+        setTimeout(() => {
+          send({ seq: seq++, type: "event", event: "output", body: { category: "stdout", output: "Program completed\n" } });
+          send({ seq: seq++, type: "event", event: "terminated", body: {} });
+        }, 50);
+      }
       break;
     case "launch":
       currentLine = 1;
+      stopOnEntry = !!msg.arguments.stopOnEntry;
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "launch", success: true, body: {} });
       send({ seq: seq++, type: "event", event: "output", body: { category: "stdout", output: "Program started\n" } });
-      if (msg.arguments.stopOnEntry) {
+      if (stopOnEntry) {
         setTimeout(() => { send({ seq: seq++, type: "event", event: "stopped", body: { reason: "entry", threadId: 1, allThreadsStopped: true } }); }, 50);
       }
       break;
@@ -104,6 +119,13 @@ function handleMessage(msg) {
             { name: "x", value: "42", type: "int", variablesReference: 0 },
             { name: "name", value: "'hello'", type: "str", variablesReference: 0 },
             { name: "data", value: "[1, 2, 3]", type: "list", variablesReference: 300 },
+          ] } });
+      } else if (msg.arguments.variablesReference === 300) {
+        send({ seq: seq++, type: "response", request_seq: msg.seq, command: "variables", success: true,
+          body: { variables: [
+            { name: "0", value: "1", type: "int", variablesReference: 0 },
+            { name: "1", value: "2", type: "int", variablesReference: 0 },
+            { name: "2", value: "3", type: "int", variablesReference: 0 },
           ] } });
       } else {
         send({ seq: seq++, type: "response", request_seq: msg.seq, command: "variables", success: true, body: { variables: [] } });

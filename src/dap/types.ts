@@ -24,6 +24,16 @@
 
 export type SessionState = "idle" | "configuring" | "running" | "stopped" | "terminated";
 
+export interface Variable {
+  name: string;
+  value: string;
+  type?: string;
+  hasChildren: boolean;
+  variablesReference: number;
+  /** Populated when getVariables is called with depth > 1 and this variable has children. */
+  children?: Variable[];
+}
+
 export interface StoppedState {
   status: "stopped";
   reason: string;
@@ -43,13 +53,7 @@ export interface StoppedState {
   }>;
   scopes: Array<{
     name: string;
-    variables: Array<{
-      name: string;
-      value: string;
-      type?: string;
-      hasChildren: boolean;
-      variablesReference: number;
-    }>;
+    variables: Variable[];
   }>;
   output?: string[];
 }
@@ -72,6 +76,8 @@ export interface AdapterConfig {
 }
 
 export interface OutputEntry {
+  /** Monotonic per-session sequence number assigned at push time. Survives ring-buffer eviction. */
+  seq: number;
   category: string;
   text: string;
   timestamp: string;

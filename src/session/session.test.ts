@@ -69,6 +69,48 @@ describe("DebugSession", () => {
     expect(output.output).toHaveLength(1);
     expect(output.output[0].text).toBe("hello world");
     expect(output.output[0].category).toBe("stdout");
+    expect(output.output[0].seq).toBe(1);
+    expect(output.nextSince).toBe(1);
+  });
+
+  it("returns only new entries when called with since", async () => {
+    session = new DebugSession("test-since", {
+      type: "mock",
+      runtime: "node",
+      program: MOCK_ADAPTER,
+    });
+    session.addOutput("stdout", "line 1");
+    session.addOutput("stdout", "line 2");
+    const first = session.getOutput();
+    expect(first.output).toHaveLength(2);
+    expect(first.nextSince).toBe(2);
+
+    session.addOutput("stdout", "line 3");
+    session.addOutput("stderr", "err 1");
+    const incremental = session.getOutput(undefined, false, first.nextSince);
+    expect(incremental.output.map((e) => e.text)).toEqual(["line 3", "err 1"]);
+    expect(incremental.nextSince).toBe(4);
+
+    // No new entries since the latest nextSince
+    const empty = session.getOutput(undefined, false, incremental.nextSince);
+    expect(empty.output).toHaveLength(0);
+    expect(empty.nextSince).toBe(4);
+  });
+
+  it("combines since with category filter", async () => {
+    session = new DebugSession("test-since-cat", {
+      type: "mock",
+      runtime: "node",
+      program: MOCK_ADAPTER,
+    });
+    session.addOutput("stdout", "out 1");
+    session.addOutput("stderr", "err 1");
+    session.addOutput("stdout", "out 2");
+    session.addOutput("stderr", "err 2");
+
+    const stderrOnly = session.getOutput("stderr", false, 1);
+    expect(stderrOnly.output.map((e) => e.text)).toEqual(["err 1", "err 2"]);
+    expect(stderrOnly.nextSince).toBe(4);
   });
 
   it("detects adapter crash", async () => {

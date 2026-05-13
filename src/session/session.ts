@@ -29,6 +29,7 @@ import {
   OutputEntry,
   BreakpointConfig,
   BreakpointResult,
+  Variable,
 } from "../dap/types.js";
 import { DebugProtocol } from "@vscode/debugprotocol";
 import path from "node:path";
@@ -42,6 +43,7 @@ export class DebugSession {
   private adapterConfig: AdapterConfig;
   private _state: SessionState = "idle";
   private outputBuffer = new RingBuffer<OutputEntry>(MAX_OUTPUT_LINES);
+  private nextOutputSeq = 1;
   private breakpointsMap = new Map<string, BreakpointConfig[]>();
   private capabilities: DebugProtocol.Capabilities = {};
   private stoppedThreadId?: number;
@@ -51,6 +53,7 @@ export class DebugSession {
   private launchMode: "launch" | "attach" = "launch";
   private stoppedResolvers: Array<(event: DebugProtocol.StoppedEvent) => void> = [];
   private initializedResolvers: Array<() => void> = [];
+  private terminatedResolvers: Array<() => void> = [];
   private _initializedReceived = false;
 
   constructor(id: string, config: AdapterConfig) {
@@ -69,7 +72,14 @@ export class DebugSession {
       if (this._state !== "terminated") {
         this._state = "terminated";
       }
+      this.resolveTerminatedWaiters();
     });
+  }
+
+  private resolveTerminatedWaiters(): void {
+    const resolvers = this.terminatedResolvers;
+    this.terminatedResolvers = [];
+    for (const r of resolvers) r();
   }
 
   get state(): SessionState {
@@ -199,6 +209,29 @@ export class DebugSession {
     await this.client.sendRequest("pause", { threadId: tid });
   }
 
+  async waitForTerminated(timeout = DEFAULT_TIMEOUT): Promise<void> {
+    if (this._state === "terminated") return;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const wrapped = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const idx = this.terminatedResolvers.indexOf(wrapped);
+        if (idx !== -1) this.terminatedResolvers.splice(idx, 1);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = this.terminatedResolvers.indexOf(wrapped);
+        if (idx !== -1) this.terminatedResolvers.splice(idx, 1);
+        reject(new Error("timeout"));
+      }, timeout);
+      this.terminatedResolvers.push(wrapped);
+    });
+  }
+
   async waitForStopped(timeout = DEFAULT_TIMEOUT): Promise<DebugProtocol.StoppedEvent> {
     if (this._state === "stopped") {
       return {
@@ -251,17 +284,9 @@ export class DebugSession {
   async getVariables(
     variablesReference: number,
     depth = 1
-  ): Promise<
-    Array<{
-      name: string;
-      value: string;
-      type?: string;
-      hasChildren: boolean;
-      variablesReference: number;
-    }>
-  > {
+  ): Promise<Variable[]> {
     const response = await this.client.sendRequest("variables", { variablesReference });
-    const vars = ((response.body?.variables as DebugProtocol.Variable[]) || []).map((v) => ({
+    const vars: Variable[] = ((response.body?.variables as DebugProtocol.Variable[]) || []).map((v) => ({
       name: v.name,
       value: v.value,
       type: v.type,
@@ -271,8 +296,7 @@ export class DebugSession {
     if (depth > 1) {
       for (const v of vars) {
         if (v.hasChildren) {
-          const children = await this.getVariables(v.variablesReference, depth - 1);
-          v.value = `${v.value} { ${children.map((c) => `${c.name}: ${c.value}`).join(", ")} }`;
+          v.children = await this.getVariables(v.variablesReference, depth - 1);
         }
       }
     }
@@ -345,16 +369,28 @@ export class DebugSession {
   }
 
   addOutput(category: string, text: string): void {
-    this.outputBuffer.push({ category, text, timestamp: new Date().toISOString() });
+    this.outputBuffer.push({
+      seq: this.nextOutputSeq++,
+      category,
+      text,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   getOutput(
     category?: string,
-    clear = false
-  ): { output: OutputEntry[]; truncated: boolean } {
-    const entries = category
-      ? this.outputBuffer.getFiltered((e) => e.category === category)
-      : this.outputBuffer.getAll();
+    clear = false,
+    since?: number
+  ): { output: OutputEntry[]; truncated: boolean; nextSince: number } {
+    const matches = (e: OutputEntry): boolean => {
+      if (category && e.category !== category) return false;
+      if (since !== undefined && e.seq <= since) return false;
+      return true;
+    };
+    const entries =
+      category !== undefined || since !== undefined
+        ? this.outputBuffer.getFiltered(matches)
+        : this.outputBuffer.getAll();
     const truncated = this.outputBuffer.truncated;
     if (clear) {
       if (category) {
@@ -363,7 +399,9 @@ export class DebugSession {
         this.outputBuffer.clear();
       }
     }
-    return { output: entries, truncated };
+    const lastInResult = entries.length > 0 ? entries[entries.length - 1].seq : undefined;
+    const nextSince = lastInResult ?? since ?? this.nextOutputSeq - 1;
+    return { output: entries, truncated, nextSince };
   }
 
   async disconnect(terminateDebuggee?: boolean): Promise<void> {
@@ -429,6 +467,7 @@ export class DebugSession {
       case "terminated":
       case "exited":
         this._state = "terminated";
+        this.resolveTerminatedWaiters();
         break;
     }
   }

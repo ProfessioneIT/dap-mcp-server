@@ -101,6 +101,27 @@ describe("Debug Lifecycle Integration", () => {
     expect(session.state).toBe("terminated");
   });
 
+  it("returns nested children when collectState uses variableDepth > 1", async () => {
+    session = new DebugSession("integ-deep", { type: "mock", runtime: "node", program: MOCK_ADAPTER });
+    await session.initialize();
+    const launchPromise = session.launch({ program: "/test/app.py", stopOnEntry: true });
+    await session.configurationDone();
+    await launchPromise;
+    await session.waitForStopped(5000);
+
+    const state = await session.collectState(1, 10, 2);
+    const locals = state.scopes.find(s => s.name === "Locals");
+    const data = locals!.variables.find(v => v.name === "data");
+    expect(data).toBeDefined();
+    expect(data!.hasChildren).toBe(true);
+    expect(data!.children).toBeDefined();
+    expect(data!.children!.map(c => c.value)).toEqual(["1", "2", "3"]);
+
+    // Leaf variables should not get a children property.
+    const x = locals!.variables.find(v => v.name === "x");
+    expect(x!.children).toBeUndefined();
+  });
+
   it("handles adapter crash gracefully", async () => {
     const crashAdapter = path.join(__dirname, "../test-fixtures/crash-adapter.js");
     session = new DebugSession("integ-crash", { type: "mock", runtime: "node", program: crashAdapter });

@@ -24,12 +24,15 @@ Additional adapters (e.g. Node.js via js-debug) can be registered via the `confi
 
 | Tool | Description |
 |------|-------------|
-| `debug_launch` | Start a debug session (launch a program with breakpoints) |
+| `debug_inspect` | **One-shot:** launch → run to breakpoint → evaluate expressions → disconnect. Use first when you just need a value at a line. |
+| `debug_run` | **One-shot:** launch → run to completion → return all output. Combine with logpoints for printf-style debugging without editing source. |
+| `debug_launch` | Start an interactive debug session (launch a program with breakpoints) |
 | `debug_attach` | Attach to a running process |
 | `debug_restart` | Restart with the same configuration |
 | `debug_disconnect` | End a debug session |
-| `set_breakpoints` | Set/replace breakpoints in a file |
+| `set_breakpoints` | Set/replace breakpoints in a file (use `logMessage` for logpoints) |
 | `set_exception_breakpoints` | Break on exceptions |
+| `list_breakpoints` | List currently-registered breakpoints for a session |
 | `get_state` | Get threads, stack trace, scopes, and variables |
 | `evaluate` | Evaluate an expression in the debuggee context |
 | `step` | Continue, next, stepIn, stepOut, or pause |
