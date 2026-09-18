@@ -39,7 +39,26 @@ export class AdapterRegistry {
   }
 
   get(type: string): AdapterConfig | undefined {
-    return this.project.get(type) ?? this.global.get(type) ?? this.builtins.get(type);
+    const builtin = this.builtins.get(type);
+    const global = this.global.get(type);
+    const project = this.project.get(type);
+    if (!builtin && !global && !project) return undefined;
+
+    const merged: Partial<AdapterConfig> = {};
+    for (const layer of [builtin, global, project]) {
+      if (!layer) continue;
+      for (const [key, value] of Object.entries(layer)) {
+        if (value !== undefined && key !== "launchDefaults") {
+          (merged as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
+    merged.launchDefaults = {
+      ...builtin?.launchDefaults,
+      ...global?.launchDefaults,
+      ...project?.launchDefaults,
+    };
+    return merged as AdapterConfig;
   }
 
   register(config: AdapterConfig, scope: "global" | "project" = "project"): void {
@@ -48,17 +67,20 @@ export class AdapterRegistry {
   }
 
   listAll(): Array<AdapterConfig & { source: "builtin" | "global" | "project" }> {
-    const result = new Map<string, AdapterConfig & { source: "builtin" | "global" | "project" }>();
-    for (const [type, config] of this.builtins) {
-      result.set(type, { ...config, source: "builtin" });
-    }
-    for (const [type, config] of this.global) {
-      result.set(type, { ...config, source: "global" });
-    }
-    for (const [type, config] of this.project) {
-      result.set(type, { ...config, source: "project" });
-    }
-    return Array.from(result.values());
+    const types = new Set([
+      ...this.builtins.keys(),
+      ...this.global.keys(),
+      ...this.project.keys(),
+    ]);
+    return Array.from(types, (type) => {
+      const config = this.get(type)!;
+      const source = this.project.has(type)
+        ? "project"
+        : this.global.has(type)
+          ? "global"
+          : "builtin";
+      return { ...config, source };
+    });
   }
 
   async load(): Promise<void> {

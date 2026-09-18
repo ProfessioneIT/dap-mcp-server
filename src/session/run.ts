@@ -116,15 +116,8 @@ export async function runDebugRun(
         await session.continueExecution();
       }
 
-      try {
-        await Promise.race([
-          session.waitForTerminated(remaining),
-          session.waitForStopped(remaining),
-        ]);
-      } catch {
-        // Both rejected (timeout). Bail.
-        break;
-      }
+      const outcome = await session.waitForStopOrTermination(remaining);
+      if (outcome.status === "timeout") break;
     }
 
     const { output } = session.getOutput();

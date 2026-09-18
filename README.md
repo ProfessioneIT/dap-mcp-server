@@ -16,15 +16,18 @@ Any DAP-compliant debug adapter works. Built-in defaults for:
 |----------|---------|---------|
 | Python | debugpy | `pip install debugpy` |
 | Go | Delve | `go install github.com/go-delve/delve/cmd/dlv@latest` |
+| Node.js / TypeScript | vscode-js-debug | Configure its `dapDebugServer.js` path or install it in the project |
 | C/C++ | lldb-dap | `apt install lldb` / `brew install llvm` |
 
-Additional adapters (e.g. Node.js via js-debug) can be registered via the `configure_adapter` tool or config files.
+Additional adapters, and project-specific paths for the built-ins, can be registered via `configure_adapter` or config files.
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `debug_inspect` | **One-shot:** launch → run to breakpoint → evaluate expressions → disconnect. Use first when you just need a value at a line. |
+| `debug_doctor` | **Start here:** detect the project, recommend an adapter, verify its complete command, and return setup remediation. |
+| `debug_at` | **Primary debugging call:** infer the adapter, stop at a line, evaluate expressions, and clean up. |
+| `debug_inspect` | **One-shot:** launch → run to breakpoint → evaluate expressions → disconnect when the adapter is already known. |
 | `debug_run` | **One-shot:** launch → run to completion → return all output. Combine with logpoints for printf-style debugging without editing source. |
 | `debug_launch` | Start an interactive debug session (launch a program with breakpoints) |
 | `debug_attach` | Attach to a running process |
@@ -57,7 +60,20 @@ npm run build
 
 ## Usage with Claude Code
 
-Add to your MCP configuration (`~/.claude/mcp.json` or project `.mcp.json`):
+Register the server for the current user:
+
+```bash
+claude mcp add --scope user dap -- npx -y dap-mcp-server
+```
+
+The repository also contains a Claude Code plugin that bundles the MCP declaration and the activation skill. During local development, validate and load it with:
+
+```bash
+claude plugin validate integrations/claude/dap-debugging
+claude --plugin-dir ./integrations/claude/dap-debugging
+```
+
+To configure MCP manually, use a project `.mcp.json`:
 
 ```json
 {
@@ -82,16 +98,18 @@ Or if installed globally:
 }
 ```
 
-A `SKILL.md` file is included in the package. Copy it to `.claude/skills/` in your project to teach Claude Code when and how to use the debugger:
+A `SKILL.md` file is included in the package. After a local package install, copy it to the required skill directory layout:
 
 ```bash
-mkdir -p .claude/skills
-cp node_modules/dap-mcp-server/SKILL.md .claude/skills/dap-debugging.md
+mkdir -p .claude/skills/dap-debugging
+cp node_modules/dap-mcp-server/SKILL.md .claude/skills/dap-debugging/SKILL.md
 ```
+
+For a global npm install, the source file is under `$(npm root -g)/dap-mcp-server/SKILL.md`, not the project's `node_modules`.
 
 ## Design
 
-Tools are deliberately coarse-grained. A single `get_state` call returns threads, stack trace, scopes, and variables — instead of requiring 4 separate calls. The `step` tool blocks synchronously until the debuggee stops again and returns the new state. This minimizes round-trips for AI agents that think in terms of "step forward and show me what happened."
+Tools are deliberately coarse-grained. `debug_doctor` makes setup failures actionable and `debug_at` performs the common detect → launch → stop → inspect → cleanup workflow in one call. A single `get_state` call returns threads, stack trace, scopes, and variables. The `step` tool blocks until the debuggee stops again and returns the new state.
 
 Session IDs are optional when only one debug session is active. Breakpoints can be set inline with `debug_launch` for single-call debugging setup.
 

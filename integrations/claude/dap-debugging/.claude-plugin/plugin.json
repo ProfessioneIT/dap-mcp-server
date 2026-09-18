@@ -1,0 +1,9 @@
+{
+  "name": "dap-debugging",
+  "description": "LLM-first runtime debugging through standard Debug Adapter Protocol adapters",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ivan Iraci"
+  },
+  "repository": "ssh://git@forgejo.professioneit.com/ProfessioneIT/dap-mcp-server.git"
+}

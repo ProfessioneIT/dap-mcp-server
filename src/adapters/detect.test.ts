@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { checkAdapterAvailable } from "./detect.js";
+import { checkAdapterAvailable, inspectAdapterAvailability } from "./detect.js";
 
 describe("checkAdapterAvailable", () => {
   it("detects 'node' as available", async () => {
@@ -32,5 +32,35 @@ describe("checkAdapterAvailable", () => {
   it("detects non-existent binary as unavailable", async () => {
     const result = await checkAdapterAvailable("definitely-not-a-real-binary-xyz");
     expect(result).toBe(false);
+  });
+
+  it("detects a missing runtime-hosted adapter script", async () => {
+    const result = await inspectAdapterAvailability({
+      type: "node",
+      runtime: "node",
+      program: "/definitely/missing/dapDebugServer.js",
+    });
+    expect(result.available).toBe(false);
+    expect(result.reason).toMatch(/not found/i);
+  });
+
+  it("checks Python modules used with -m", async () => {
+    const result = await inspectAdapterAvailability({
+      type: "python",
+      runtime: "node",
+      program: "-m",
+      args: ["definitely_missing_python_module"],
+    });
+    expect(result.available).toBe(false);
+  });
+
+  it("rejects incomplete TCP adapter configuration", async () => {
+    const result = await inspectAdapterAvailability({
+      type: "custom-tcp",
+      program: "node",
+      transport: "tcp",
+    });
+    expect(result.available).toBe(false);
+    expect(result.reason).toMatch(/portMatcher/);
   });
 });

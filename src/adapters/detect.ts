@@ -21,7 +21,10 @@
  */
 
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
+import { AdapterConfig } from "../dap/types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -33,4 +36,105 @@ export async function checkAdapterAvailable(command: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export interface AdapterAvailability {
+  available: boolean;
+  command: string;
+  reason?: string;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate the complete adapter command, not just its runtime. This prevents
+ * configurations such as `node missing-adapter.js` from being reported as
+ * available merely because Node itself is installed.
+ */
+export async function inspectAdapterAvailability(
+  config: AdapterConfig
+): Promise<AdapterAvailability> {
+  const command = config.runtime || config.program;
+  if (config.transport === "tcp") {
+    if (!config.portMatcher) {
+      return {
+        available: false,
+        command,
+        reason: "TCP adapters require a portMatcher with one capture group for the listening port.",
+      };
+    }
+    try {
+      new RegExp(config.portMatcher);
+    } catch {
+      return {
+        available: false,
+        command,
+        reason: `The configured portMatcher is not a valid regular expression: ${config.portMatcher}`,
+      };
+    }
+  }
+  if (!(await checkAdapterAvailable(command))) {
+    return {
+      available: false,
+      command,
+      reason: `Executable '${command}' was not found on PATH.`,
+    };
+  }
+
+  if (!config.runtime) {
+    return { available: true, command };
+  }
+
+  if (config.program === "-m") {
+    const moduleName = config.args?.[0];
+    if (!moduleName) {
+      return {
+        available: false,
+        command,
+        reason: "The adapter uses '-m' but no module name is configured.",
+      };
+    }
+    try {
+      await execFileAsync(config.runtime, [
+        "-c",
+        "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
+        moduleName,
+      ]);
+      return { available: true, command: `${config.runtime} -m ${moduleName}` };
+    } catch {
+      return {
+        available: false,
+        command: `${config.runtime} -m ${moduleName}`,
+        reason: `Python module '${moduleName}' is not installed for '${config.runtime}'.`,
+      };
+    }
+  }
+
+  const looksLikeScript =
+    path.isAbsolute(config.program) ||
+    /[\\/]/.test(config.program) ||
+    /\.(?:cjs|js|mjs|py|jar)$/i.test(config.program);
+  if (!looksLikeScript) {
+    return { available: true, command };
+  }
+
+  const resolved = path.resolve(config.program);
+  if (await fileExists(resolved)) {
+    return { available: true, command: `${config.runtime} ${resolved}` };
+  }
+  if (await checkAdapterAvailable(config.program)) {
+    return { available: true, command: `${config.runtime} ${config.program}` };
+  }
+  return {
+    available: false,
+    command: `${config.runtime} ${config.program}`,
+    reason: `Adapter program '${config.program}' was not found.`,
+  };
 }

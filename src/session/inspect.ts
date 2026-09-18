@@ -23,11 +23,11 @@
 import { AdapterRegistry } from "../adapters/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { DebugSession } from "./session.js";
-import { AdapterConfig } from "../dap/types.js";
+import { AdapterConfig, BreakpointResult } from "../dap/types.js";
 
 export interface InspectOptions {
   adapter: string;
-  program: string;
+  program?: string;
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
@@ -39,6 +39,8 @@ export interface InspectOptions {
   };
   expressions?: string[];
   timeout?: number;
+  /** Adapter-specific launch fields, merged below explicit common options. */
+  launchConfig?: Record<string, unknown>;
   adapterConfig?: AdapterConfig;
 }
 
@@ -55,6 +57,8 @@ export interface InspectResult {
   values?: Record<string, InspectValueResult>;
   output?: string[];
   status?: string;
+  timedOut?: boolean;
+  breakpoint?: BreakpointResult;
 }
 
 /**
@@ -83,9 +87,10 @@ export async function runDebugInspect(
 
     const launchArgs: Record<string, unknown> = {
       ...config.launchDefaults,
-      program: opts.program,
+      ...opts.launchConfig,
       stopOnEntry: false,
     };
+    if (opts.program !== undefined) launchArgs.program = opts.program;
     if (opts.args !== undefined) launchArgs.args = opts.args;
     if (opts.cwd !== undefined) launchArgs.cwd = opts.cwd;
     if (opts.env !== undefined) launchArgs.env = opts.env;
@@ -101,30 +106,46 @@ export async function runDebugInspect(
     launchPromise.catch(() => { /* handled at await */ });
     await session.waitForInitialized(10000);
 
-    await session.setBreakpoints(opts.at.file, [
+    const breakpoint = (await session.setBreakpoints(opts.at.file, [
       {
         line: opts.at.line,
         condition: opts.at.condition,
         hitCondition: opts.at.hitCondition,
       },
-    ]);
+    ]))[0];
 
     await session.configurationDone();
     await launchPromise;
 
     const waitMs = opts.timeout ?? 30000;
-    try {
-      await session.waitForStopped(waitMs);
-    } catch {
+    const outcome = await session.waitForStopOrTermination(waitMs);
+    if (outcome.status !== "stopped") {
       const { output } = session.getOutput();
       return {
         hit: false,
-        status: session.state,
+        reason:
+          outcome.status === "terminated"
+            ? "Program terminated before reaching the breakpoint."
+            : breakpoint && !breakpoint.verified
+              ? breakpoint.message ?? "The adapter did not verify the breakpoint."
+              : "Timed out while waiting for the breakpoint.",
+        status: outcome.status === "timeout" ? session.state : outcome.status,
+        timedOut: outcome.status === "timeout",
+        breakpoint,
         output: output.map((e) => e.text),
       };
     }
 
     const state = await session.collectState();
+    const effectiveBreakpoint =
+      breakpoint && state.reason === "breakpoint"
+        ? {
+            ...breakpoint,
+            verified: true,
+            line: opts.at.line,
+            message: breakpoint.verified ? breakpoint.message : undefined,
+          }
+        : breakpoint;
     const values: Record<string, InspectValueResult> = {};
     if (opts.expressions && opts.expressions.length > 0) {
       // Some adapters (vscode-js-debug) require a frameId to evaluate names
@@ -148,6 +169,7 @@ export async function runDebugInspect(
       values: opts.expressions && opts.expressions.length > 0 ? values : undefined,
       output: state.output,
       status: "stopped",
+      breakpoint: effectiveBreakpoint,
     };
   } finally {
     sessions.remove(session.id);

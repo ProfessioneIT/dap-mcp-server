@@ -32,7 +32,8 @@ import { SessionManager } from "./session/session-manager.js";
 import { DebugSession } from "./session/session.js";
 import { runDebugInspect } from "./session/inspect.js";
 import { runDebugRun } from "./session/run.js";
-import { checkAdapterAvailable } from "./adapters/detect.js";
+import { inspectAdapterAvailability } from "./adapters/detect.js";
+import { resolveProjectAdapter, runDebugDoctor } from "./diagnostics/doctor.js";
 
 function readPackageVersion(): string {
   try {
@@ -54,7 +55,7 @@ export function createServer(): McpServer {
   const sessions = new SessionManager();
 
   // Load persisted adapter configs (best-effort, don't block server start)
-  registry.load().catch((err: unknown) => {
+  const registryReady = registry.load().catch((err: unknown) => {
     console.error("Warning: failed to load adapter configs:", err);
   });
 
@@ -65,41 +66,225 @@ export function createServer(): McpServer {
     },
     {
       instructions: [
-        "This server provides AI-driven debugging via the Debug Adapter Protocol (DAP).",
-        "",
-        "## When to use which tool",
-        "",
-        "- **`debug_inspect`** — One-shot 'what is X at line N?'. Launches, hits a breakpoint, evaluates expressions,",
-        "  disconnects. Use this first; it collapses a multi-call workflow into a single call.",
-        "- **`debug_run`** — Run a program with no stops and collect all output. Combine with `logpoints` (breakpoints",
-        "  with `logMessage`) for printf-style debugging without modifying source.",
-        "- **`debug_launch` + step/evaluate** — Interactive multi-step session when you need to explore.",
-        "",
-        "## Interactive Debugging Workflow",
-        "",
-        "1. `list_adapters` — discover available adapters; the response includes a summary and install hints.",
-        "2. `debug_launch` (or `debug_attach`) — start a session. With breakpoints provided, `stopOnEntry` defaults",
-        "   to false so the program runs to the first breakpoint. Returns sessionId + initial stopped state.",
-        "3. Inspect state with `get_state` — threads + call stack + scopes + variables in one call.",
-        "4. `step` — continue, next, stepIn, stepOut, pause. Blocks until stopped; returns new state directly.",
-        "5. `evaluate` — expressions in the context of a stopped frame.",
-        "6. `set_breakpoints` / `set_exception_breakpoints` — modify breakpoints mid-session. Use `logMessage`",
-        "   on a breakpoint to make it a logpoint (emits formatted text without pausing).",
-        "7. `list_breakpoints` — see what's currently set.",
-        "8. `get_output` — retrieve stdout/stderr/console output (10K-line ring buffer).",
-        "9. `debug_disconnect` — end. `debug_restart` replays the launch config with preserved breakpoints.",
-        "",
-        "## Key Conventions",
-        "",
-        "- **Auto-session resolution**: tools accept an optional `sessionId`; with one active session, omit it.",
-        "- **Synchronous stepping**: `step` returns the new stopped state. Don't follow it with `get_state`.",
-        "- **Variable depth**: `get_state` accepts `variableDepth` (default 1). With `> 1`, container variables",
-        "  expose their entries as a structured `children` array.",
-        "- **stopOnEntry default**: false when `debug_launch` is given breakpoints, true otherwise.",
-        "- **Adapter registration**: `configure_adapter` persists to `~/.dap-mcp/adapters.json` (global) or",
-        "  `./.dap-mcp/adapters.json` (project); project overrides global.",
-        "- **Error handling**: tool errors return `isError: true`. The session usually remains usable.",
+        "Local source-code debugger using the Debug Adapter Protocol.",
+        "Use it when a test fails, a program crashes, runtime state is unclear, or code behavior cannot be explained statically.",
+        "Start with debug_doctor to detect the project and verify adapter readiness.",
+        "Prefer debug_at for a one-call breakpoint inspection: it selects the adapter, launches, waits, evaluates expressions, and cleans up.",
+        "Use debug_run when output or termination is enough. Use debug_launch only for interactive stepping or multiple inspection points.",
+        "For interactive sessions: debug_launch -> get_state/evaluate -> step -> debug_disconnect. A launch with breakpoints waits by default and reports stopped, terminated, or timeout explicitly.",
+        "Omit sessionId when exactly one session is active. Adapter-specific DAP fields belong in launchConfig. Tool errors use isError=true.",
       ].join("\n"),
+    }
+  );
+
+  const doctorOutputSchema = z.object({
+    cwd: z.string(),
+    ready: z.boolean(),
+    recommendedAdapter: z.string().optional(),
+    detected: z.object({
+      languages: z.array(z.string()),
+      testFrameworks: z.array(z.string()),
+      packageManager: z.string().optional(),
+      pythonPath: z.string().optional(),
+      launchJson: z.string().optional(),
+    }),
+    adapters: z.array(
+      z.object({
+        type: z.string(),
+        source: z.enum(["builtin", "global", "project"]),
+        selected: z.boolean(),
+        available: z.boolean(),
+        command: z.string(),
+        reason: z.string().optional(),
+        installHint: z.string().optional(),
+        runtime: z.string().optional(),
+        program: z.string(),
+        transport: z.enum(["stdio", "tcp"]),
+      })
+    ),
+    nextSteps: z.array(z.string()),
+  });
+
+  const breakpointResultSchema = z.object({
+    id: z.number().optional(),
+    verified: z.boolean(),
+    line: z.number(),
+    message: z.string().optional(),
+  });
+
+  const debugAtOutputSchema = z.object({
+    adapter: z.string(),
+    hit: z.boolean(),
+    reason: z.string().optional(),
+    location: z
+      .object({
+        file: z.string(),
+        line: z.number(),
+        functionName: z.string().optional(),
+        column: z.number().optional(),
+      })
+      .optional(),
+    values: z
+      .record(
+        z.string(),
+        z.object({
+          result: z.string().optional(),
+          type: z.string().optional(),
+          error: z.string().optional(),
+        })
+      )
+      .optional(),
+    output: z.array(z.string()).optional(),
+    status: z.string().optional(),
+    timedOut: z.boolean().optional(),
+    breakpoint: breakpointResultSchema.optional(),
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // High-level LLM entry points
+  // ────────────────────────────────────────────────────────────────────────────
+  server.registerTool(
+    "debug_doctor",
+    {
+      title: "Check debugger readiness",
+      description:
+        "Inspect a local project, detect its language/tooling, select the likely debug adapter, verify the complete adapter command, and return concrete remediation. Use this before debugging or when an adapter fails to start.",
+      inputSchema: z.object({
+        cwd: z.string().optional().describe("Project directory (default: server working directory)"),
+        adapter: z.string().optional().describe("Adapter to validate instead of auto-detecting one"),
+      }),
+      outputSchema: doctorOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (options) => {
+      try {
+        await registryReady;
+        const result = await runDebugDoctor(registry, options);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          structuredContent: { ...result },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    "debug_at",
+    {
+      title: "Inspect runtime state at a line",
+      description:
+        "Primary one-shot debugging tool for bugs and failing behavior. Auto-selects a ready adapter, launches the program, stops at file:line, evaluates expressions, reports breakpoint/termination/timeout details, and cleans up.",
+      inputSchema: z.object({
+        cwd: z.string().optional().describe("Project and debuggee working directory"),
+        adapter: z.string().optional().describe("Adapter type; auto-detected from file/project when omitted"),
+        program: z
+          .string()
+          .optional()
+          .describe("Launch target; defaults to file for Python/Node and cwd for Go"),
+        args: z.array(z.string()).optional().describe("Program arguments"),
+        env: z.record(z.string(), z.string()).optional().describe("Environment variables"),
+        file: z.string().describe("Source file containing the breakpoint"),
+        line: z.number().int().positive().describe("One-based breakpoint line"),
+        condition: z.string().optional().describe("Conditional breakpoint expression"),
+        hitCondition: z.string().optional().describe("Adapter-specific hit count condition"),
+        expressions: z.array(z.string()).optional().describe("Expressions to evaluate in the stopped frame"),
+        timeout: z.number().positive().optional().describe("Breakpoint wait timeout in milliseconds"),
+        launchConfig: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Adapter-specific DAP launch fields"),
+      }),
+      outputSchema: debugAtOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (options) => {
+      try {
+        await registryReady;
+        const cwd = path.resolve(options.cwd ?? process.cwd());
+        const sourceFile = path.resolve(cwd, options.file);
+        const resolved = await resolveProjectAdapter(registry, {
+          cwd,
+          adapter: options.adapter,
+          sourceFile,
+        });
+        const adapter = resolved.result.recommendedAdapter;
+        if (!adapter || !resolved.config || !resolved.result.ready) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Debugger is not ready:\n${JSON.stringify(resolved.result, null, 2)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const hasLaunchTarget =
+          options.launchConfig !== undefined &&
+          ["program", "module", "code"].some(
+            (key) => options.launchConfig?.[key] !== undefined
+          );
+        if (!options.program && !hasLaunchTarget && adapter === "cppdbg") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Error: C/C++ debugging requires the compiled executable in program or launchConfig.program.",
+              },
+            ],
+            isError: true,
+          };
+        }
+        const program =
+          options.program ??
+          (hasLaunchTarget ? undefined : adapter === "go" ? cwd : sourceFile);
+
+        const result = await runDebugInspect(registry, sessions, {
+          adapter,
+          adapterConfig: resolved.config,
+          program,
+          args: options.args,
+          cwd,
+          env: options.env,
+          at: {
+            file: sourceFile,
+            line: options.line,
+            condition: options.condition,
+            hitCondition: options.hitCondition,
+          },
+          expressions: options.expressions,
+          timeout: options.timeout,
+          launchConfig: options.launchConfig,
+        });
+        const structuredContent = { adapter, ...result };
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(structuredContent, null, 2) },
+          ],
+          structuredContent,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${String(err)}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -110,20 +295,31 @@ export function createServer(): McpServer {
     "list_adapters",
     "List all known debug adapters with their availability status on this machine. Returns a summary line, the full adapter list, and a separate 'missing' list with installation hints for adapters that aren't installed.",
     {},
+    {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async () => {
       try {
+        await registryReady;
         const adapters = registry.listAll();
         const results = await Promise.all(
           adapters.map(async (a) => {
-            const cmd = a.runtime || a.program;
-            const available = cmd ? await checkAdapterAvailable(cmd) : false;
-            return { ...a, available };
+            const availability = await inspectAdapterAvailability(a);
+            return { ...a, ...availability };
           })
         );
         const available = results.filter((r) => r.available);
         const missing = results
           .filter((r) => !r.available)
-          .map((r) => ({ type: r.type, installHint: r.installHint }));
+          .map((r) => ({
+            type: r.type,
+            command: r.command,
+            reason: r.reason,
+            installHint: r.installHint,
+          }));
         const summary =
           missing.length === 0
             ? `${available.length}/${results.length} adapters available`
@@ -158,11 +354,29 @@ export function createServer(): McpServer {
       args: z.array(z.string()).optional().describe("Additional arguments to pass to the adapter"),
       launchDefaults: z.record(z.string(), z.unknown()).optional().describe("Default launch configuration properties"),
       installHint: z.string().optional().describe("Hint shown when adapter is not installed"),
+      transport: z.enum(["stdio", "tcp"]).optional().describe("DAP transport used by the adapter"),
+      portMatcher: z.string().optional().describe("Regex whose first capture group is the TCP port"),
       scope: z.enum(["global", "project"]).optional().describe("Where to persist the adapter config (default: project)"),
     },
-    async ({ type, program, runtime, args, launchDefaults, installHint, scope }) => {
+    {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({ type, program, runtime, args, launchDefaults, installHint, transport, portMatcher, scope }) => {
       try {
-        const config = { type, program, runtime, args, launchDefaults, installHint };
+        await registryReady;
+        const config = {
+          type,
+          program,
+          runtime,
+          args,
+          launchDefaults,
+          installHint,
+          transport,
+          portMatcher,
+        };
         const saveScope = scope ?? "project";
         registry.register(config, saveScope);
         await registry.save(saveScope);
@@ -188,13 +402,17 @@ export function createServer(): McpServer {
   // ────────────────────────────────────────────────────────────────────────────
   server.tool(
     "debug_launch",
-    "Launch a program under a debug adapter. Performs the full DAP initialization lifecycle and returns the session ID and initial stopped state.",
+    "Launch an interactive debug session. With a breakpoint or stopOnEntry, waits by default and reports whether execution stopped, terminated, or timed out.",
     {
       adapter: z.string().describe("Adapter type to use (e.g. 'python', 'node')"),
-      program: z.string().describe("Path to the program to debug"),
+      program: z.string().optional().describe("Path to the program to debug; may instead be supplied through launchConfig"),
       args: z.array(z.string()).optional().describe("Program arguments"),
       cwd: z.string().optional().describe("Working directory for the program"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables"),
+      launchConfig: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe("Adapter-specific DAP launch properties; explicit common fields take precedence"),
       stopOnEntry: z
         .boolean()
         .optional()
@@ -215,6 +433,11 @@ export function createServer(): McpServer {
         .array(z.string())
         .optional()
         .describe("Exception filter IDs (e.g. ['uncaughtExceptions'])"),
+      waitForStop: z
+        .boolean()
+        .optional()
+        .describe("Wait for stopped/terminated outcome; defaults to true when a stop is expected"),
+      timeout: z.number().positive().optional().describe("Wait timeout in milliseconds (default: 30000)"),
       adapterConfig: z
         .object({
           type: z.string(),
@@ -235,16 +458,22 @@ export function createServer(): McpServer {
       args,
       cwd,
       env,
+      launchConfig,
       stopOnEntry,
       breakpoints,
       exceptionBreakpoints,
+      waitForStop,
+      timeout,
       adapterConfig,
     }) => {
-      // Default: if breakpoints are provided, run to the first one; otherwise stop at entry.
-      const shouldStop =
-        stopOnEntry ?? !(breakpoints !== undefined && breakpoints.length > 0);
+      // Default: run to a configured breakpoint/exception; otherwise stop at entry.
+      const expectsConfiguredStop =
+        (breakpoints !== undefined && breakpoints.length > 0) ||
+        (exceptionBreakpoints !== undefined && exceptionBreakpoints.length > 0);
+      const shouldStop = stopOnEntry ?? !expectsConfiguredStop;
       let session: DebugSession | undefined;
       try {
+        await registryReady;
         const config =
           adapterConfig ??
           registry.get(adapter);
@@ -271,9 +500,10 @@ export function createServer(): McpServer {
         // Build launch request
         const launchArgs: Record<string, unknown> = {
           ...config.launchDefaults,
-          program,
+          ...launchConfig,
           stopOnEntry: shouldStop,
         };
+        if (program !== undefined) launchArgs.program = program;
         if (args !== undefined) launchArgs.args = args;
         if (cwd !== undefined) launchArgs.cwd = cwd;
         if (env !== undefined) launchArgs.env = env;
@@ -301,6 +531,10 @@ export function createServer(): McpServer {
         await session.waitForInitialized(10000);
 
         // Set breakpoints grouped by file
+        const breakpointResults: Array<{
+          file: string;
+          breakpoints: Awaited<ReturnType<DebugSession["setBreakpoints"]>>;
+        }> = [];
         if (breakpoints && breakpoints.length > 0) {
           const byFile = new Map<string, typeof breakpoints>();
           for (const bp of breakpoints) {
@@ -309,7 +543,7 @@ export function createServer(): McpServer {
             byFile.set(bp.file, existing);
           }
           for (const [file, bps] of byFile) {
-            await session.setBreakpoints(
+            const results = await session.setBreakpoints(
               file,
               bps.map((b) => ({
                 line: b.line,
@@ -318,6 +552,7 @@ export function createServer(): McpServer {
                 logMessage: b.logMessage,
               }))
             );
+            breakpointResults.push({ file, breakpoints: results });
           }
         }
 
@@ -332,13 +567,22 @@ export function createServer(): McpServer {
         // Now await the launch response
         await launchPromise;
 
+        const shouldWait =
+          waitForStop ?? (shouldStop || expectsConfiguredStop);
         let stateData: Record<string, unknown>;
-        if (shouldStop) {
-          try {
-            await session.waitForStopped(10000);
+        if (shouldWait) {
+          const startedAt = Date.now();
+          const outcome = await session.waitForStopOrTermination(timeout ?? 30000);
+          if (outcome.status === "stopped") {
             stateData = (await session.collectState()) as unknown as Record<string, unknown>;
-          } catch {
-            stateData = { status: session.state };
+          } else if (outcome.status === "terminated") {
+            const { output } = session.getOutput();
+            stateData = {
+              status: "terminated",
+              output: output.map((entry) => entry.text),
+            };
+          } else {
+            stateData = { status: session.state, timedOut: true, elapsedMs: Date.now() - startedAt };
           }
         } else {
           stateData = { status: session.state };
@@ -348,7 +592,11 @@ export function createServer(): McpServer {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ sessionId: id, ...stateData }, null, 2),
+              text: JSON.stringify(
+                { sessionId: id, breakpoints: breakpointResults, ...stateData },
+                null,
+                2
+              ),
             },
           ],
         };
@@ -394,6 +642,7 @@ export function createServer(): McpServer {
     async ({ adapter, port, host, processId, attachConfig, adapterConfig }) => {
       let session: DebugSession | undefined;
       try {
+        await registryReady;
         const config = adapterConfig ?? registry.get(adapter);
         if (!config) {
           return {
@@ -537,6 +786,12 @@ export function createServer(): McpServer {
         .optional()
         .describe("If running, wait up to this many milliseconds for the program to stop (default: 0 = don't wait)"),
     },
+    {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     async ({ sessionId, threadId, depth, variableDepth, timeout }) => {
       try {
         const session = sessions.resolve(sessionId);
@@ -550,14 +805,12 @@ export function createServer(): McpServer {
         }
 
         if (waitMs > 0 && session.state === "running") {
-          try {
-            await session.waitForStopped(waitMs);
+          const outcome = await session.waitForStopOrTermination(waitMs);
+          if (outcome.status === "stopped") {
             const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1);
             return {
               content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
             };
-          } catch {
-            // Timed out — fall through to return running status
           }
         }
 
@@ -677,12 +930,10 @@ export function createServer(): McpServer {
             break;
         }
 
-        try {
-          await session.waitForStopped(waitMs);
-        } catch (err) {
-          // Timeout or terminated
+        const outcome = await session.waitForStopOrTermination(waitMs);
+        if (outcome.status !== "stopped") {
           const elapsed = Date.now() - startTime;
-          if (session.state === "terminated") {
+          if (outcome.status === "terminated") {
             const { output } = session.getOutput();
             return {
               content: [
@@ -702,22 +953,6 @@ export function createServer(): McpServer {
               {
                 type: "text" as const,
                 text: JSON.stringify({ status: "running", elapsedMs: elapsed }, null, 2),
-              },
-            ],
-          };
-        }
-
-        if (session.state === "terminated") {
-          const { output } = session.getOutput();
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  { status: "terminated", output: output.map((e) => e.text) },
-                  null,
-                  2
-                ),
               },
             ],
           };
@@ -755,6 +990,12 @@ export function createServer(): McpServer {
         .describe(
           "Return only entries with seq > since. Pass the `nextSince` value from a prior call to fetch incremental output."
         ),
+    },
+    {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
     },
     async ({ sessionId, category, clear, since }) => {
       try {
@@ -879,13 +1120,17 @@ export function createServer(): McpServer {
         await launchPromise;
 
         const stopOnEntry = launchConfig.stopOnEntry !== false;
+        const shouldWait = stopOnEntry || savedBreakpoints.size > 0;
         let stateData: Record<string, unknown>;
-        if (stopOnEntry) {
-          try {
-            await newSession.waitForStopped(10000);
+        if (shouldWait) {
+          const outcome = await newSession.waitForStopOrTermination(30000);
+          if (outcome.status === "stopped") {
             stateData = (await newSession.collectState()) as unknown as Record<string, unknown>;
-          } catch {
-            stateData = { status: newSession.state };
+          } else {
+            stateData = {
+              status: outcome.status === "timeout" ? newSession.state : "terminated",
+              timedOut: outcome.status === "timeout",
+            };
           }
         } else {
           stateData = { status: newSession.state };
@@ -944,6 +1189,10 @@ export function createServer(): McpServer {
         .number()
         .optional()
         .describe("Milliseconds to wait for the breakpoint to be hit (default: 30000)"),
+      launchConfig: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe("Adapter-specific DAP launch fields"),
       adapterConfig: z
         .object({
           type: z.string(),
@@ -960,6 +1209,7 @@ export function createServer(): McpServer {
     },
     async (opts) => {
       try {
+        await registryReady;
         const result = await runDebugInspect(registry, sessions, opts);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
@@ -981,6 +1231,12 @@ export function createServer(): McpServer {
     "List the breakpoints currently registered with a session, grouped by source file. Includes regular breakpoints, conditional breakpoints, and logpoints.",
     {
       sessionId: z.string().optional().describe("Session ID (omit if only one session is active)"),
+    },
+    {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
     async ({ sessionId }) => {
       try {
@@ -1050,6 +1306,7 @@ export function createServer(): McpServer {
     },
     async (opts) => {
       try {
+        await registryReady;
         const result = await runDebugRun(registry, sessions, opts);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],

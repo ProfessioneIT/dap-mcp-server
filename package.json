@@ -19,6 +19,11 @@
   "bin": {
     "dap-mcp-server": "build/index.js"
   },
+  "files": [
+    "build",
+    "SKILL.md",
+    "integrations/claude/dap-debugging"
+  ],
   "directories": {
     "doc": "docs"
   },

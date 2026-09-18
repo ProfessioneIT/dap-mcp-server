@@ -65,8 +65,14 @@ function handleMessage(msg) {
       break;
     case "setBreakpoints":
       breakpointCount += (msg.arguments.breakpoints || []).length;
+      const provisional = (msg.arguments.source?.path || "").includes("provisional");
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "setBreakpoints", success: true,
-        body: { breakpoints: (msg.arguments.breakpoints || []).map((bp, i) => ({ id: i+1, verified: true, line: bp.line })) } });
+        body: { breakpoints: (msg.arguments.breakpoints || []).map((bp, i) => ({
+          id: i+1,
+          verified: !provisional,
+          line: provisional ? 0 : bp.line,
+          message: provisional ? "breakpoint.provisionalBreakpoint" : undefined,
+        })) } });
       break;
     case "setExceptionBreakpoints":
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "setExceptionBreakpoints", success: true, body: {} });

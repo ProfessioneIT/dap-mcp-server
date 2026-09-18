@@ -123,4 +123,33 @@ describe("DebugSession", () => {
     await expect(session.initialize()).rejects.toThrow();
     expect(session.state).toBe("terminated");
   });
+
+  it("distinguishes termination from a stop while waiting", async () => {
+    session = new DebugSession("test-terminated-outcome", {
+      type: "mock",
+      runtime: "node",
+      program: MOCK_ADAPTER,
+    });
+    await session.initialize();
+    await session.launch({ program: "example.py", stopOnEntry: false });
+    await session.configurationDone();
+
+    await expect(session.waitForStopOrTermination(1000)).resolves.toEqual({
+      status: "terminated",
+    });
+  });
+
+  it("returns stopped state from the combined lifecycle wait", async () => {
+    session = new DebugSession("test-stopped-outcome", {
+      type: "mock",
+      runtime: "node",
+      program: MOCK_ADAPTER,
+    });
+    await session.initialize();
+    await session.launch({ program: "example.py", stopOnEntry: true });
+    await session.configurationDone();
+
+    const outcome = await session.waitForStopOrTermination(1000);
+    expect(outcome.status).toBe("stopped");
+  });
 });

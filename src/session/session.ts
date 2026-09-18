@@ -37,6 +37,11 @@ import path from "node:path";
 const MAX_OUTPUT_LINES = 10000;
 const DEFAULT_TIMEOUT = 30000;
 
+export type SessionWaitOutcome =
+  | { status: "stopped"; event: DebugProtocol.StoppedEvent }
+  | { status: "terminated" }
+  | { status: "timeout" };
+
 export class DebugSession {
   readonly id: string;
   private client: DAPClient;
@@ -54,6 +59,7 @@ export class DebugSession {
   private stoppedResolvers: Array<(event: DebugProtocol.StoppedEvent) => void> = [];
   private initializedResolvers: Array<() => void> = [];
   private terminatedResolvers: Array<() => void> = [];
+  private lifecycleResolvers: Array<(outcome: SessionWaitOutcome) => void> = [];
   private _initializedReceived = false;
 
   constructor(id: string, config: AdapterConfig) {
@@ -76,6 +82,7 @@ export class DebugSession {
         this._state = "terminated";
       }
       this.resolveTerminatedWaiters();
+      this.resolveLifecycleWaiters({ status: "terminated" });
     });
   }
 
@@ -83,6 +90,12 @@ export class DebugSession {
     const resolvers = this.terminatedResolvers;
     this.terminatedResolvers = [];
     for (const r of resolvers) r();
+  }
+
+  private resolveLifecycleWaiters(outcome: SessionWaitOutcome): void {
+    const resolvers = this.lifecycleResolvers;
+    this.lifecycleResolvers = [];
+    for (const resolve of resolvers) resolve(outcome);
   }
 
   get state(): SessionState {
@@ -177,39 +190,39 @@ export class DebugSession {
   async launch(config: Record<string, unknown>): Promise<void> {
     this.launchConfig = config;
     this.launchMode = "launch";
-    await this.client.sendRequest("launch", config);
     this._state = "running";
+    await this.client.sendRequest("launch", config);
   }
 
   async attach(config: Record<string, unknown>): Promise<void> {
     this.attachConfig = config;
     this.launchMode = "attach";
-    await this.client.sendRequest("attach", config);
     this._state = "running";
+    await this.client.sendRequest("attach", config);
   }
 
   async continueExecution(threadId?: number): Promise<void> {
     const tid = threadId ?? this.stoppedThreadId ?? 1;
-    await this.client.sendRequest("continue", { threadId: tid });
     this._state = "running";
+    await this.client.sendRequest("continue", { threadId: tid });
   }
 
   async next(threadId?: number): Promise<void> {
     const tid = threadId ?? this.stoppedThreadId ?? 1;
-    await this.client.sendRequest("next", { threadId: tid });
     this._state = "running";
+    await this.client.sendRequest("next", { threadId: tid });
   }
 
   async stepIn(threadId?: number): Promise<void> {
     const tid = threadId ?? this.stoppedThreadId ?? 1;
-    await this.client.sendRequest("stepIn", { threadId: tid });
     this._state = "running";
+    await this.client.sendRequest("stepIn", { threadId: tid });
   }
 
   async stepOut(threadId?: number): Promise<void> {
     const tid = threadId ?? this.stoppedThreadId ?? 1;
-    await this.client.sendRequest("stepOut", { threadId: tid });
     this._state = "running";
+    await this.client.sendRequest("stepOut", { threadId: tid });
   }
 
   async pause(threadId?: number): Promise<void> {
@@ -270,6 +283,40 @@ export class DebugSession {
     });
   }
 
+  /**
+   * Wait for the next meaningful lifecycle outcome without racing two promises.
+   * Unlike waitForStopped/waitForTerminated, a timeout is returned as data so
+   * callers can reliably distinguish a running process from a completed one.
+   */
+  async waitForStopOrTermination(timeout = DEFAULT_TIMEOUT): Promise<SessionWaitOutcome> {
+    if (this._state === "stopped") {
+      return {
+        status: "stopped",
+        event: {
+          seq: 0,
+          type: "event",
+          event: "stopped",
+          body: { reason: this.stoppedReason || "unknown", threadId: this.stoppedThreadId },
+        } as DebugProtocol.StoppedEvent,
+      };
+    }
+    if (this._state === "terminated") return { status: "terminated" };
+
+    return new Promise<SessionWaitOutcome>((resolve) => {
+      let settled = false;
+      const wrappedResolve = (outcome: SessionWaitOutcome) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const index = this.lifecycleResolvers.indexOf(wrappedResolve);
+        if (index !== -1) this.lifecycleResolvers.splice(index, 1);
+        resolve(outcome);
+      };
+      const timer = setTimeout(() => wrappedResolve({ status: "timeout" }), timeout);
+      this.lifecycleResolvers.push(wrappedResolve);
+    });
+  }
+
   async getThreads(): Promise<DebugProtocol.Thread[]> {
     const response = await this.client.sendRequest("threads");
     return (response.body?.threads as DebugProtocol.Thread[]) || [];
@@ -321,8 +368,13 @@ export class DebugSession {
     hasChildren: boolean;
     variablesReference: number;
   }> {
+    let resolvedFrameId = frameId;
+    if (resolvedFrameId === undefined && this._state === "stopped") {
+      const frames = await this.getStackTrace(this.stoppedThreadId ?? 1, 1);
+      resolvedFrameId = frames[0]?.id;
+    }
     const args: Record<string, unknown> = { expression, context };
-    if (frameId !== undefined) args.frameId = frameId;
+    if (resolvedFrameId !== undefined) args.frameId = resolvedFrameId;
     const response = await this.client.sendRequest("evaluate", args);
     return {
       result: (response.body?.result as string) ?? "",
@@ -420,6 +472,8 @@ export class DebugSession {
       /* Ignore — adapter may have already exited */
     }
     this._state = "terminated";
+    this.resolveTerminatedWaiters();
+    this.resolveLifecycleWaiters({ status: "terminated" });
     await this.client.dispose();
   }
 
@@ -461,6 +515,10 @@ export class DebugSession {
           this.stoppedResolvers = [];
           for (const resolve of resolvers) resolve(event as DebugProtocol.StoppedEvent);
         }
+        this.resolveLifecycleWaiters({
+          status: "stopped",
+          event: event as DebugProtocol.StoppedEvent,
+        });
         break;
       case "continued":
         this._state = "running";
@@ -476,6 +534,7 @@ export class DebugSession {
       case "exited":
         this._state = "terminated";
         this.resolveTerminatedWaiters();
+        this.resolveLifecycleWaiters({ status: "terminated" });
         break;
     }
   }

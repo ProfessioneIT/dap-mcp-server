@@ -84,6 +84,30 @@ describe("runDebugInspect", () => {
     expect(result.values).toBeUndefined();
   });
 
+  it("marks a provisional breakpoint verified once it is actually hit", async () => {
+    const registry = new AdapterRegistry(
+      path.join(os.tmpdir(), `dap-test-${Date.now()}-global`),
+      path.join(os.tmpdir(), `dap-test-${Date.now()}-project`)
+    );
+    const sessions = new SessionManager();
+
+    const result = await runDebugInspect(registry, sessions, {
+      adapter: "mock",
+      program: "/test/app.py",
+      at: { file: "/test/provisional.py", line: 5 },
+      timeout: 5000,
+      adapterConfig: {
+        type: "mock",
+        runtime: "node",
+        program: MOCK_ADAPTER,
+      },
+    });
+
+    expect(result.hit).toBe(true);
+    expect(result.breakpoint).toMatchObject({ verified: true, line: 5 });
+    expect(result.breakpoint?.message).toBeUndefined();
+  });
+
   it("rejects when adapter is unknown and no inline config provided", async () => {
     const registry = new AdapterRegistry(
       path.join(os.tmpdir(), `dap-test-${Date.now()}-global`),
@@ -121,6 +145,9 @@ describe("runDebugInspect", () => {
     });
 
     expect(result.hit).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.reason).toMatch(/timed out/i);
+    expect(result.breakpoint?.verified).toBe(true);
     expect(sessions.listAll()).toHaveLength(0);
   });
 });

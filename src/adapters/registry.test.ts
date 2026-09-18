@@ -61,6 +61,24 @@ describe("AdapterRegistry", () => {
     expect(python!.program).toBe("/custom/debugpy");
   });
 
+  it("merges overrides with built-in transport settings", () => {
+    registry.register({
+      type: "node",
+      runtime: "node",
+      program: "/custom/dapDebugServer.js",
+      args: undefined,
+      transport: undefined,
+    });
+    const node = registry.get("node");
+    expect(node).toMatchObject({
+      program: "/custom/dapDebugServer.js",
+      transport: "tcp",
+      args: ["0", "127.0.0.1"],
+      launchDefaults: { type: "pwa-node", request: "launch" },
+    });
+    expect(node?.portMatcher).toBeDefined();
+  });
+
   it("saves and loads config from disk", async () => {
     registry.register({ type: "ruby", program: "/usr/bin/rdbg" });
     await registry.save("project");

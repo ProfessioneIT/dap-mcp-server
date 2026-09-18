@@ -84,7 +84,8 @@ describe("Debug Lifecycle Integration", () => {
     expect(stoppedAfterStep.body.reason).toBe("step");
 
     // Evaluate expression
-    const evalResult = await session.evaluate("x + 1", 1);
+    // Omitting frameId should resolve the top stopped frame automatically.
+    const evalResult = await session.evaluate("x + 1");
     expect(evalResult.result).toBe("42");
 
     // Continue
