@@ -36,7 +36,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@vscode/debugprotocol": "^1.68.0"
   },
   "peerDependencies": {
@@ -45,6 +45,6 @@
   "devDependencies": {
     "@types/node": "^25.3.3",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.11"
   }
 }
