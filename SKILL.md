@@ -51,6 +51,10 @@ Use `debug_launch` only when one-shot inspection is insufficient, such as multip
 5. Use `set_breakpoints` to move or add breakpoints.
 6. Always finish with `debug_disconnect`.
 
+`step` answers compactly: frame-local scopes, a short stack, and only output not reported before. Call `get_state` when globals, a deeper stack, or `variableDepth` > 1 are needed; CPU registers are fetched only with `scopes: ["Registers"]`. Read the whole output buffer with `get_output`.
+
+To debug a process that is already running or was started suspended (JVM with JDWP `suspend=y`, a server), use `debug_attach` and pass `breakpoints` in that same call so they bind before the process resumes.
+
 Omit `sessionId` when exactly one session is active. Use absolute paths for programs and source files.
 
 ## Output-First Debugging

@@ -72,4 +72,30 @@ export const BUILTIN_ADAPTERS: AdapterConfig[] = [
     args: [],
     installHint: "apt install lldb (Debian/Ubuntu) or brew install llvm (macOS)",
   },
+  // php adapter: vscode-php-debug's phpDebug.js. Like node, there is no
+  // universal install path, so the user points `program` at it; the
+  // launchDefaults below still apply to that override (the registry merges
+  // them across tiers).
+  {
+    type: "php",
+    runtime: "node",
+    program: "phpDebug.js",
+    args: [],
+    // The adapter listens on `port` and xdebug connects back to it. Without
+    // these runtimeArgs PHP runs to completion before xdebug ever connects,
+    // so no breakpoint is hit.
+    launchDefaults: {
+      port: 9003,
+      hostname: "127.0.0.1",
+      runtimeArgs: [
+        "-dxdebug.mode=debug",
+        "-dxdebug.start_with_request=yes",
+        "-dxdebug.client_host=127.0.0.1",
+        "-dxdebug.client_port=9003",
+      ],
+    },
+    installHint:
+      "Install xdebug 3 and vscode-php-debug, then set the adapter's `program` to its out/phpDebug.js path " +
+      "(e.g. via `configure_adapter`). See https://github.com/xdebug/vscode-php-debug.",
+  },
 ];

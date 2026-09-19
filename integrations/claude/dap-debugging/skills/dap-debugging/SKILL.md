@@ -46,4 +46,6 @@ Use `debug_launch` only for multiple stops or stepping. A launch with breakpoint
 4. Move breakpoints with `set_breakpoints` as the hypothesis changes.
 5. Finish with `debug_disconnect`.
 
+`step` answers compactly (frame-local scopes, short stack, new output only); use `get_state` for globals, deeper stacks, or `scopes: ["Registers"]`. For a running or suspended process, call `debug_attach` with `breakpoints` so they bind before it resumes.
+
 Omit `sessionId` when one session is active. Use `debug_run` when output and termination are sufficient. For repeated observations, use logpoints (`logMessage`) and read them with `get_output` instead of editing source to add prints.

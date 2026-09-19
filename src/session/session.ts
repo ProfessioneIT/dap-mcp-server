@@ -30,12 +30,23 @@ import {
   BreakpointConfig,
   BreakpointResult,
   Variable,
+  CollectStateOptions,
+  ExceptionDetails,
 } from "../dap/types.js";
 import { DebugProtocol } from "@vscode/debugprotocol";
 import path from "node:path";
 
 const MAX_OUTPUT_LINES = 10000;
+const MAX_STATE_OUTPUT_ENTRIES = 50;
 const DEFAULT_TIMEOUT = 30000;
+
+function isRegistersScope(scope: DebugProtocol.Scope): boolean {
+  return scope.presentationHint === "registers" || /^registers?$/i.test(scope.name);
+}
+
+function isFrameLocalScope(scope: DebugProtocol.Scope): boolean {
+  return !scope.expensive && !/^(global|static)/i.test(scope.name);
+}
 
 export type SessionWaitOutcome =
   | { status: "stopped"; event: DebugProtocol.StoppedEvent }
@@ -49,10 +60,14 @@ export class DebugSession {
   private _state: SessionState = "idle";
   private outputBuffer = new RingBuffer<OutputEntry>(MAX_OUTPUT_LINES);
   private nextOutputSeq = 1;
+  private lastReportedOutputSeq = 0;
   private breakpointsMap = new Map<string, BreakpointConfig[]>();
   private capabilities: DebugProtocol.Capabilities = {};
   private stoppedThreadId?: number;
   private stoppedReason?: string;
+  private stoppedDescription?: string;
+  private _exitCode?: number;
+  private exitCodeResolvers: Array<() => void> = [];
   private launchConfig?: Record<string, unknown>;
   private attachConfig?: Record<string, unknown>;
   private launchMode: "launch" | "attach" = "launch";
@@ -317,6 +332,31 @@ export class DebugSession {
     });
   }
 
+  get exitCode(): number | undefined {
+    return this._exitCode;
+  }
+
+  /**
+   * The debuggee's exit code, if the adapter reports one. Adapters disagree on
+   * whether `exited` precedes or trails `terminated`, so callers that have just
+   * seen termination give it a short grace period.
+   */
+  async waitForExitCode(timeout = 250): Promise<number | undefined> {
+    if (this._exitCode !== undefined) return this._exitCode;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, timeout);
+      const resolvers = this.exitCodeResolvers;
+      function done() {
+        clearTimeout(timer);
+        const idx = resolvers.indexOf(done);
+        if (idx !== -1) resolvers.splice(idx, 1);
+        resolve();
+      }
+      resolvers.push(done);
+    });
+    return this._exitCode;
+  }
+
   async getThreads(): Promise<DebugProtocol.Thread[]> {
     const response = await this.client.sendRequest("threads");
     return (response.body?.threads as DebugProtocol.Thread[]) || [];
@@ -384,10 +424,48 @@ export class DebugSession {
     };
   }
 
+  private async getExceptionDetails(threadId: number): Promise<ExceptionDetails | undefined> {
+    if (this.capabilities.supportsExceptionInfoRequest) {
+      try {
+        const response = await this.client.sendRequest("exceptionInfo", { threadId });
+        const body = response.body as DebugProtocol.ExceptionInfoResponse["body"] | undefined;
+        if (body) {
+          return {
+            id: body.exceptionId,
+            description: body.description ?? body.details?.message,
+            breakMode: body.breakMode,
+          };
+        }
+      } catch {
+        /* Fall back to what the stopped event said */
+      }
+    }
+    return this.stoppedDescription ? { description: this.stoppedDescription } : undefined;
+  }
+
+  /**
+   * Output no earlier state has reported yet, capped to the newest entries.
+   * The full buffer always stays available through getOutput().
+   */
+  unreportedOutput(consume: boolean): { output?: string[]; outputOmitted?: number } {
+    const since = this.lastReportedOutputSeq;
+    const entries = this.outputBuffer.getFiltered((e) => e.seq > since);
+    if (consume && entries.length > 0) {
+      this.lastReportedOutputSeq = entries[entries.length - 1].seq;
+    }
+    if (entries.length === 0) return {};
+    const omitted = Math.max(0, entries.length - MAX_STATE_OUTPUT_ENTRIES);
+    return {
+      output: entries.slice(omitted).map((e) => e.text),
+      outputOmitted: omitted > 0 ? omitted : undefined,
+    };
+  }
+
   async collectState(
     threadId?: number,
     depth = 10,
-    variableDepth = 1
+    variableDepth = 1,
+    options: CollectStateOptions = {}
   ): Promise<StoppedState> {
     const tid = threadId ?? this.stoppedThreadId ?? 1;
     const threads = await this.getThreads();
@@ -403,17 +481,28 @@ export class DebugSession {
       : { file: "<unknown>", line: 0 };
 
     const scopes: StoppedState["scopes"] = [];
+    const omittedScopes: string[] = [];
     if (topFrame) {
+      const requested = options.scopes?.map((name) => name.toLowerCase());
       const rawScopes = await this.getScopes(topFrame.id);
       for (const scope of rawScopes) {
+        const wanted = requested
+          ? requested.includes(scope.name.toLowerCase())
+          : !isRegistersScope(scope) && (!options.localsOnly || isFrameLocalScope(scope));
+        if (!wanted) {
+          omittedScopes.push(scope.name);
+          continue;
+        }
         const variables = await this.getVariables(scope.variablesReference, variableDepth);
         scopes.push({ name: scope.name, variables });
       }
     }
-    const output = this.outputBuffer.getAll().map((e) => e.text);
+    const reason = this.stoppedReason || "unknown";
+    const exception = reason === "exception" ? await this.getExceptionDetails(tid) : undefined;
     return {
       status: "stopped",
-      reason: this.stoppedReason || "unknown",
+      reason,
+      exception,
       location,
       threads: threads.map((t) => ({ id: t.id, name: t.name, stopped: t.id === tid })),
       stackTrace: frames.map((f) => ({
@@ -424,7 +513,8 @@ export class DebugSession {
         column: f.column,
       })),
       scopes,
-      output: output.length > 0 ? output : undefined,
+      omittedScopes: omittedScopes.length > 0 ? omittedScopes : undefined,
+      ...this.unreportedOutput(options.consumeOutput ?? false),
     };
   }
 
@@ -510,6 +600,7 @@ export class DebugSession {
         this._state = "stopped";
         this.stoppedThreadId = event.body?.threadId as number | undefined;
         this.stoppedReason = event.body?.reason as string | undefined;
+        this.stoppedDescription = (event.body?.text ?? event.body?.description) as string | undefined;
         {
           const resolvers = this.stoppedResolvers;
           this.stoppedResolvers = [];
@@ -532,6 +623,10 @@ export class DebugSession {
         break;
       case "terminated":
       case "exited":
+        if (event.event === "exited" && typeof event.body?.exitCode === "number") {
+          this._exitCode = event.body.exitCode;
+          for (const resolve of [...this.exitCodeResolvers]) resolve();
+        }
         this._state = "terminated";
         this.resolveTerminatedWaiters();
         this.resolveLifecycleWaiters({ status: "terminated" });

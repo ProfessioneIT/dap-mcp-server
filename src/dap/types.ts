@@ -55,7 +55,29 @@ export interface StoppedState {
     name: string;
     variables: Variable[];
   }>;
+  /** Scopes the adapter offers but that were not fetched (e.g. CPU registers). */
+  omittedScopes?: string[];
+  /** Present when `reason` is "exception". */
+  exception?: ExceptionDetails;
+  /** Output not yet reported by an earlier state, newest entries last. */
   output?: string[];
+  /** Number of older unreported entries dropped from `output`; get_output has them. */
+  outputOmitted?: number;
+}
+
+export interface ExceptionDetails {
+  id?: string;
+  description?: string;
+  breakMode?: string;
+}
+
+export interface CollectStateOptions {
+  /** Scope names to fetch (case-insensitive). Default: every scope except CPU registers. */
+  scopes?: string[];
+  /** Also skip global/static/expensive scopes; used by compact responses. */
+  localsOnly?: boolean;
+  /** Mark the returned output as reported, so the next state only carries newer output. */
+  consumeOutput?: boolean;
 }
 
 export interface RunningState {

@@ -33,7 +33,13 @@ import { DebugSession } from "./session/session.js";
 import { runDebugInspect } from "./session/inspect.js";
 import { runDebugRun } from "./session/run.js";
 import { inspectAdapterAvailability } from "./adapters/detect.js";
-import { resolveProjectAdapter, runDebugDoctor } from "./diagnostics/doctor.js";
+import {
+  conciseDoctorResult,
+  resolveProjectAdapter,
+  runDebugDoctor,
+} from "./diagnostics/doctor.js";
+import { buildLaunchArgs, defaultCargoProgram } from "./adapters/recipes.js";
+import { COMPACT_STACK_DEPTH, renderState } from "./session/state-format.js";
 
 function readPackageVersion(): string {
   try {
@@ -72,6 +78,8 @@ export function createServer(): McpServer {
         "Prefer debug_at for a one-call breakpoint inspection: it selects the adapter, launches, waits, evaluates expressions, and cleans up.",
         "Use debug_run when output or termination is enough. Use debug_launch only for interactive stepping or multiple inspection points.",
         "For interactive sessions: debug_launch -> get_state/evaluate -> step -> debug_disconnect. A launch with breakpoints waits by default and reports stopped, terminated, or timeout explicitly.",
+        "step answers compactly (frame-local scopes, short stack) and states carry only output not reported before; use get_state for the full picture and get_output for the whole buffer.",
+        "To debug an already-running or suspended process, pass breakpoints to debug_attach so they bind before it resumes.",
         "Omit sessionId when exactly one session is active. Adapter-specific DAP fields belong in launchConfig. Tool errors use isError=true.",
       ].join("\n"),
     }
@@ -102,6 +110,7 @@ export function createServer(): McpServer {
         transport: z.enum(["stdio", "tcp"]),
       })
     ),
+    otherAdapters: z.array(z.string()).optional(),
     nextSteps: z.array(z.string()),
   });
 
@@ -116,6 +125,14 @@ export function createServer(): McpServer {
     adapter: z.string(),
     hit: z.boolean(),
     reason: z.string().optional(),
+    hint: z.string().optional(),
+    exception: z
+      .object({
+        id: z.string().optional(),
+        description: z.string().optional(),
+        breakMode: z.string().optional(),
+      })
+      .optional(),
     location: z
       .object({
         file: z.string(),
@@ -136,9 +153,72 @@ export function createServer(): McpServer {
       .optional(),
     output: z.array(z.string()).optional(),
     status: z.string().optional(),
+    exitCode: z.number().optional(),
     timedOut: z.boolean().optional(),
     breakpoint: breakpointResultSchema.optional(),
   });
+
+  const breakpointInputSchema = z.object({
+    file: z.string().describe("Source file path"),
+    line: z.number().describe("Line number"),
+    condition: z.string().optional(),
+    hitCondition: z.string().optional(),
+    logMessage: z.string().optional(),
+  });
+  type BreakpointInput = z.infer<typeof breakpointInputSchema>;
+
+  const detailSchema = z.enum(["compact", "full"]);
+
+  /** Set breakpoints grouped by file; must run between `initialized` and configurationDone. */
+  async function applyBreakpoints(session: DebugSession, breakpoints: BreakpointInput[] = []) {
+    const byFile = new Map<string, BreakpointInput[]>();
+    for (const bp of breakpoints) {
+      const existing = byFile.get(bp.file) ?? [];
+      existing.push(bp);
+      byFile.set(bp.file, existing);
+    }
+    const results: Array<{
+      file: string;
+      breakpoints: Awaited<ReturnType<DebugSession["setBreakpoints"]>>;
+    }> = [];
+    for (const [file, bps] of byFile) {
+      const fileResults = await session.setBreakpoints(
+        file,
+        bps.map(({ line, condition, hitCondition, logMessage }) => ({
+          line,
+          condition,
+          hitCondition,
+          logMessage,
+        }))
+      );
+      results.push({ file, breakpoints: fileResults });
+    }
+    return results;
+  }
+
+  /** What to report once the program is no longer running under our control. */
+  async function terminatedReport(session: DebugSession): Promise<Record<string, unknown>> {
+    return {
+      status: "terminated",
+      exitCode: await session.waitForExitCode(),
+      ...session.unreportedOutput(true),
+    };
+  }
+
+  /** Wait for the first stop after launch/attach/restart and describe the outcome. */
+  async function awaitFirstStop(
+    session: DebugSession,
+    timeout: number
+  ): Promise<Record<string, unknown>> {
+    const startedAt = Date.now();
+    const outcome = await session.waitForStopOrTermination(timeout);
+    if (outcome.status === "stopped") {
+      const state = await session.collectState(undefined, 10, 1, { consumeOutput: true });
+      return state as unknown as Record<string, unknown>;
+    }
+    if (outcome.status === "terminated") return terminatedReport(session);
+    return { status: session.state, timedOut: true, elapsedMs: Date.now() - startedAt };
+  }
 
   // ────────────────────────────────────────────────────────────────────────────
   // High-level LLM entry points
@@ -152,6 +232,10 @@ export function createServer(): McpServer {
       inputSchema: z.object({
         cwd: z.string().optional().describe("Project directory (default: server working directory)"),
         adapter: z.string().optional().describe("Adapter to validate instead of auto-detecting one"),
+        verbose: z
+          .boolean()
+          .optional()
+          .describe("Include full details for every known adapter, not just the selected one"),
       }),
       outputSchema: doctorOutputSchema,
       annotations: {
@@ -224,11 +308,20 @@ export function createServer(): McpServer {
         });
         const adapter = resolved.result.recommendedAdapter;
         if (!adapter || !resolved.config || !resolved.result.ready) {
+          const { recommendedAdapter, detected, adapters, otherAdapters, nextSteps } =
+            conciseDoctorResult(resolved.result);
+          const summary = {
+            recommendedAdapter,
+            languages: detected.languages,
+            reason: adapters[0]?.reason,
+            nextSteps,
+            otherAdapters,
+          };
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Debugger is not ready:\n${JSON.stringify(resolved.result, null, 2)}`,
+                text: `Debugger is not ready: ${JSON.stringify(summary)}\nRun debug_doctor with verbose=true for full adapter details.`,
               },
             ],
             isError: true,
@@ -240,12 +333,16 @@ export function createServer(): McpServer {
           ["program", "module", "code"].some(
             (key) => options.launchConfig?.[key] !== undefined
           );
-        if (!options.program && !hasLaunchTarget && adapter === "cppdbg") {
+        const compiledProgram =
+          !options.program && !hasLaunchTarget && adapter === "cppdbg"
+            ? await defaultCargoProgram(cwd)
+            : undefined;
+        if (!options.program && !hasLaunchTarget && adapter === "cppdbg" && !compiledProgram) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: "Error: C/C++ debugging requires the compiled executable in program or launchConfig.program.",
+                text: "Error: C/C++/Rust debugging requires the compiled executable in program or launchConfig.program. For a Cargo project, run `cargo build` first and program defaults to target/debug/<package name>.",
               },
             ],
             isError: true,
@@ -253,6 +350,7 @@ export function createServer(): McpServer {
         }
         const program =
           options.program ??
+          compiledProgram ??
           (hasLaunchTarget ? undefined : adapter === "go" ? cwd : sourceFile);
 
         const result = await runDebugInspect(registry, sessions, {
@@ -418,15 +516,7 @@ export function createServer(): McpServer {
         .optional()
         .describe("Stop on program entry. Defaults to false when breakpoints are provided (run to first breakpoint), true otherwise."),
       breakpoints: z
-        .array(
-          z.object({
-            file: z.string().describe("Source file path"),
-            line: z.number().describe("Line number"),
-            condition: z.string().optional(),
-            hitCondition: z.string().optional(),
-            logMessage: z.string().optional(),
-          })
-        )
+        .array(breakpointInputSchema)
         .optional()
         .describe("Breakpoints to set before launching"),
       exceptionBreakpoints: z
@@ -497,24 +587,15 @@ export function createServer(): McpServer {
         // Initialize (waits for the initialized event internally)
         await session.initialize();
 
-        // Build launch request
-        const launchArgs: Record<string, unknown> = {
-          ...config.launchDefaults,
-          ...launchConfig,
+        const launchArgs = await buildLaunchArgs(config, {
+          program,
+          args,
+          cwd,
+          env,
+          launchConfig,
           stopOnEntry: shouldStop,
-        };
-        if (program !== undefined) launchArgs.program = program;
-        if (args !== undefined) launchArgs.args = args;
-        if (cwd !== undefined) launchArgs.cwd = cwd;
-        if (env !== undefined) launchArgs.env = env;
-
-        // Adapter-specific arg normalization. delve's `cwd` is the debuggee's
-        // working directory; the *build* (go build) runs from delve's own
-        // process cwd, controlled by `dlvCwd`. Mirror cwd → dlvCwd so a
-        // user-supplied cwd is found by `go build` looking for go.mod.
-        if (config.type === "go" && cwd !== undefined && launchArgs.dlvCwd === undefined) {
-          launchArgs.dlvCwd = cwd;
-        }
+          sourceFiles: breakpoints?.map((bp) => bp.file),
+        });
 
         // Send launch first (don't await — real adapters like debugpy block
         // the launch response until configurationDone arrives)
@@ -530,31 +611,7 @@ export function createServer(): McpServer {
         // launch — that's why we fire launch first and wait for initialized here.
         await session.waitForInitialized(10000);
 
-        // Set breakpoints grouped by file
-        const breakpointResults: Array<{
-          file: string;
-          breakpoints: Awaited<ReturnType<DebugSession["setBreakpoints"]>>;
-        }> = [];
-        if (breakpoints && breakpoints.length > 0) {
-          const byFile = new Map<string, typeof breakpoints>();
-          for (const bp of breakpoints) {
-            const existing = byFile.get(bp.file) ?? [];
-            existing.push(bp);
-            byFile.set(bp.file, existing);
-          }
-          for (const [file, bps] of byFile) {
-            const results = await session.setBreakpoints(
-              file,
-              bps.map((b) => ({
-                line: b.line,
-                condition: b.condition,
-                hitCondition: b.hitCondition,
-                logMessage: b.logMessage,
-              }))
-            );
-            breakpointResults.push({ file, breakpoints: results });
-          }
-        }
+        const breakpointResults = await applyBreakpoints(session, breakpoints);
 
         // Set exception breakpoints
         if (exceptionBreakpoints && exceptionBreakpoints.length > 0) {
@@ -569,24 +626,9 @@ export function createServer(): McpServer {
 
         const shouldWait =
           waitForStop ?? (shouldStop || expectsConfiguredStop);
-        let stateData: Record<string, unknown>;
-        if (shouldWait) {
-          const startedAt = Date.now();
-          const outcome = await session.waitForStopOrTermination(timeout ?? 30000);
-          if (outcome.status === "stopped") {
-            stateData = (await session.collectState()) as unknown as Record<string, unknown>;
-          } else if (outcome.status === "terminated") {
-            const { output } = session.getOutput();
-            stateData = {
-              status: "terminated",
-              output: output.map((entry) => entry.text),
-            };
-          } else {
-            stateData = { status: session.state, timedOut: true, elapsedMs: Date.now() - startedAt };
-          }
-        } else {
-          stateData = { status: session.state };
-        }
+        const stateData = shouldWait
+          ? await awaitFirstStop(session, timeout ?? 30000)
+          : { status: session.state };
 
         return {
           content: [
@@ -618,13 +660,26 @@ export function createServer(): McpServer {
   // ────────────────────────────────────────────────────────────────────────────
   server.tool(
     "debug_attach",
-    "Attach a debug adapter to an already-running process.",
+    "Attach a debug adapter to an already-running process. Pass breakpoints here rather than afterwards: they bind before the debuggee resumes, which is the only reliable way to stop a process started suspended (e.g. JDWP suspend=y). With breakpoints or exception breakpoints, waits and reports stopped, terminated, or timeout.",
     {
       adapter: z.string().describe("Adapter type to use"),
       port: z.number().optional().describe("Debug port to attach to"),
       host: z.string().optional().describe("Host to attach to (default: localhost)"),
       processId: z.number().optional().describe("PID of process to attach to"),
       attachConfig: z.record(z.string(), z.unknown()).optional().describe("Arbitrary attach configuration properties"),
+      breakpoints: z
+        .array(breakpointInputSchema)
+        .optional()
+        .describe("Breakpoints to bind before the debuggee resumes"),
+      exceptionBreakpoints: z
+        .array(z.string())
+        .optional()
+        .describe("Exception filter IDs (e.g. ['uncaughtExceptions'])"),
+      waitForStop: z
+        .boolean()
+        .optional()
+        .describe("Wait for stopped/terminated outcome; defaults to true when breakpoints or exception breakpoints are given"),
+      timeout: z.number().positive().optional().describe("Wait timeout in milliseconds (default: 30000)"),
       adapterConfig: z
         .object({
           type: z.string(),
@@ -639,7 +694,21 @@ export function createServer(): McpServer {
         .optional()
         .describe("Override adapter config inline"),
     },
-    async ({ adapter, port, host, processId, attachConfig, adapterConfig }) => {
+    async ({
+      adapter,
+      port,
+      host,
+      processId,
+      attachConfig,
+      breakpoints,
+      exceptionBreakpoints,
+      waitForStop,
+      timeout,
+      adapterConfig,
+    }) => {
+      const expectsConfiguredStop =
+        (breakpoints !== undefined && breakpoints.length > 0) ||
+        (exceptionBreakpoints !== undefined && exceptionBreakpoints.length > 0);
       let session: DebugSession | undefined;
       try {
         await registryReady;
@@ -677,14 +746,31 @@ export function createServer(): McpServer {
         // will still throw if attach fails.
         attachPromise.catch(() => { /* handled at await */ });
         await session.waitForInitialized(10000);
+        const breakpointResults = await applyBreakpoints(session, breakpoints);
+        if (exceptionBreakpoints && exceptionBreakpoints.length > 0) {
+          await session.setExceptionBreakpoints(exceptionBreakpoints);
+        }
         await session.configurationDone();
         await attachPromise;
+
+        const stateData =
+          waitForStop ?? expectsConfiguredStop
+            ? await awaitFirstStop(session, timeout ?? 30000)
+            : { status: session.state };
 
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ sessionId: id, status: session.state }, null, 2),
+              text: JSON.stringify(
+                {
+                  sessionId: id,
+                  breakpoints: breakpointResults.length > 0 ? breakpointResults : undefined,
+                  ...stateData,
+                },
+                null,
+                2
+              ),
             },
           ],
         };
@@ -781,6 +867,13 @@ export function createServer(): McpServer {
       threadId: z.number().optional().describe("Thread ID (uses stopped thread if omitted)"),
       depth: z.number().optional().describe("Stack trace depth (default: 10)"),
       variableDepth: z.number().optional().describe("Variable expansion depth (default: 1)"),
+      scopes: z
+        .array(z.string())
+        .optional()
+        .describe("Scope names to fetch, e.g. ['Registers']. Default: every scope except CPU registers; skipped ones are listed in omittedScopes"),
+      detail: detailSchema
+        .optional()
+        .describe("'full' (default) or 'compact' (frame-local scopes only, slimmer JSON)"),
       timeout: z
         .number()
         .optional()
@@ -792,26 +885,25 @@ export function createServer(): McpServer {
       idempotentHint: true,
       openWorldHint: false,
     },
-    async ({ sessionId, threadId, depth, variableDepth, timeout }) => {
+    async ({ sessionId, threadId, depth, variableDepth, scopes, detail, timeout }) => {
       try {
         const session = sessions.resolve(sessionId);
         const waitMs = timeout ?? 0;
-
-        if (session.state === "stopped") {
-          const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1);
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
-          };
-        }
+        const stateDetail = detail ?? "full";
 
         if (waitMs > 0 && session.state === "running") {
-          const outcome = await session.waitForStopOrTermination(waitMs);
-          if (outcome.status === "stopped") {
-            const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1);
-            return {
-              content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
-            };
-          }
+          await session.waitForStopOrTermination(waitMs);
+        }
+
+        if (session.state === "stopped") {
+          // Read-only: output stays unreported so a later step still carries it.
+          const state = await session.collectState(threadId, depth ?? 10, variableDepth ?? 1, {
+            scopes,
+            localsOnly: stateDetail === "compact",
+          });
+          return {
+            content: [{ type: "text" as const, text: renderState(state, stateDetail) }],
+          };
         }
 
         const { output } = session.getOutput();
@@ -893,22 +985,32 @@ export function createServer(): McpServer {
         .enum(["continue", "next", "stepIn", "stepOut", "pause"])
         .describe("Execution control action"),
       threadId: z.number().optional().describe("Thread ID (uses stopped thread if omitted)"),
+      detail: detailSchema
+        .optional()
+        .describe("'compact' (default: frame-local scopes, short stack, slimmer JSON) or 'full' (same shape as get_state)"),
       timeout: z
         .number()
         .optional()
         .describe("Milliseconds to wait for the program to stop after the action (default: 30000)"),
     },
-    async ({ sessionId, action, threadId, timeout }) => {
+    async ({ sessionId, action, threadId, detail, timeout }) => {
       try {
         const session = sessions.resolve(sessionId);
         const waitMs = timeout ?? 30000;
         const startTime = Date.now();
+        const stateDetail = detail ?? "compact";
+        const collectSteppedState = () =>
+          session.collectState(threadId, stateDetail === "compact" ? COMPACT_STACK_DEPTH : 10, 1, {
+            localsOnly: stateDetail === "compact",
+            consumeOutput: true,
+          });
 
         // If already stopped and asking to pause, just return current state
         if (action === "pause" && session.state === "stopped") {
-          const state = await session.collectState(threadId);
           return {
-            content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
+            content: [
+              { type: "text" as const, text: renderState(await collectSteppedState(), stateDetail) },
+            ],
           };
         }
 
@@ -934,17 +1036,9 @@ export function createServer(): McpServer {
         if (outcome.status !== "stopped") {
           const elapsed = Date.now() - startTime;
           if (outcome.status === "terminated") {
-            const { output } = session.getOutput();
             return {
               content: [
-                {
-                  type: "text" as const,
-                  text: JSON.stringify(
-                    { status: "terminated", output: output.map((e) => e.text) },
-                    null,
-                    2
-                  ),
-                },
+                { type: "text" as const, text: JSON.stringify(await terminatedReport(session)) },
               ],
             };
           }
@@ -958,9 +1052,10 @@ export function createServer(): McpServer {
           };
         }
 
-        const state = await session.collectState(threadId);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
+          content: [
+            { type: "text" as const, text: renderState(await collectSteppedState(), stateDetail) },
+          ],
         };
       } catch (err) {
         return {
@@ -1121,20 +1216,9 @@ export function createServer(): McpServer {
 
         const stopOnEntry = launchConfig.stopOnEntry !== false;
         const shouldWait = stopOnEntry || savedBreakpoints.size > 0;
-        let stateData: Record<string, unknown>;
-        if (shouldWait) {
-          const outcome = await newSession.waitForStopOrTermination(30000);
-          if (outcome.status === "stopped") {
-            stateData = (await newSession.collectState()) as unknown as Record<string, unknown>;
-          } else {
-            stateData = {
-              status: outcome.status === "timeout" ? newSession.state : "terminated",
-              timedOut: outcome.status === "timeout",
-            };
-          }
-        } else {
-          stateData = { status: newSession.state };
-        }
+        const stateData = shouldWait
+          ? await awaitFirstStop(newSession, 30000)
+          : { status: newSession.state };
 
         return {
           content: [

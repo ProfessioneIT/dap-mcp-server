@@ -23,7 +23,8 @@
 import { AdapterRegistry } from "../adapters/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { DebugSession } from "./session.js";
-import { AdapterConfig, BreakpointResult } from "../dap/types.js";
+import { AdapterConfig, BreakpointResult, ExceptionDetails } from "../dap/types.js";
+import { buildLaunchArgs, launchFailureHint } from "../adapters/recipes.js";
 
 export interface InspectOptions {
   adapter: string;
@@ -53,10 +54,16 @@ export interface InspectValueResult {
 export interface InspectResult {
   hit: boolean;
   reason?: string;
+  /** What to check when the program ran past a breakpoint the adapter never bound. */
+  hint?: string;
+  /** Present when the program stopped on an exception instead of the breakpoint. */
+  exception?: ExceptionDetails;
   location?: { file: string; line: number; functionName?: string; column?: number };
   values?: Record<string, InspectValueResult>;
   output?: string[];
   status?: string;
+  /** Debuggee exit code, when the program terminated and the adapter reports one. */
+  exitCode?: number;
   timedOut?: boolean;
   breakpoint?: BreakpointResult;
 }
@@ -85,19 +92,15 @@ export async function runDebugInspect(
   try {
     await session.initialize();
 
-    const launchArgs: Record<string, unknown> = {
-      ...config.launchDefaults,
-      ...opts.launchConfig,
+    const launchArgs = await buildLaunchArgs(config, {
+      program: opts.program,
+      args: opts.args,
+      cwd: opts.cwd,
+      env: opts.env,
+      launchConfig: opts.launchConfig,
       stopOnEntry: false,
-    };
-    if (opts.program !== undefined) launchArgs.program = opts.program;
-    if (opts.args !== undefined) launchArgs.args = opts.args;
-    if (opts.cwd !== undefined) launchArgs.cwd = opts.cwd;
-    if (opts.env !== undefined) launchArgs.env = opts.env;
-    // delve: mirror cwd → dlvCwd so `go build` finds go.mod from the right dir.
-    if (config.type === "go" && opts.cwd !== undefined && launchArgs.dlvCwd === undefined) {
-      launchArgs.dlvCwd = opts.cwd;
-    }
+      sourceFiles: [opts.at.file],
+    });
 
     const launchPromise = session.launch(launchArgs);
     // Suppress unhandled rejection: the real `await launchPromise` below will
@@ -120,9 +123,12 @@ export async function runDebugInspect(
     const waitMs = opts.timeout ?? 30000;
     const outcome = await session.waitForStopOrTermination(waitMs);
     if (outcome.status !== "stopped") {
+      const terminated = outcome.status === "terminated";
       const { output } = session.getOutput();
       return {
         hit: false,
+        hint: terminated && !breakpoint?.verified ? launchFailureHint(config.type) : undefined,
+        exitCode: terminated ? await session.waitForExitCode() : undefined,
         reason:
           outcome.status === "terminated"
             ? "Program terminated before reaching the breakpoint."
@@ -165,6 +171,7 @@ export async function runDebugInspect(
     return {
       hit: true,
       reason: state.reason,
+      exception: state.exception,
       location: state.location,
       values: opts.expressions && opts.expressions.length > 0 ? values : undefined,
       output: state.output,

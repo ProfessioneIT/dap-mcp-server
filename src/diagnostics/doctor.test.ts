@@ -92,6 +92,71 @@ describe("debug doctor", () => {
     expect(resolved.config?.portMatcher).toBeDefined();
   });
 
+  it("infers the language from loose source files when there is no manifest", async () => {
+    await fs.writeFile(path.join(tmpDir, "inventory.py"), "print('hi')\n");
+    await fs.writeFile(path.join(tmpDir, "test_inventory.py"), "");
+
+    const signals = await detectProjectSignals(tmpDir);
+    expect(signals.languages).toEqual(["python"]);
+  });
+
+  it("looks one level into src/ for loose source files", async () => {
+    await fs.mkdir(path.join(tmpDir, "src"));
+    await fs.writeFile(path.join(tmpDir, "src", "cart.php"), "<?php\n");
+
+    const signals = await detectProjectSignals(tmpDir);
+    expect(signals.languages).toEqual(["php"]);
+  });
+
+  it("prefers a manifest over a stray file of another language", async () => {
+    await fs.writeFile(path.join(tmpDir, "go.mod"), "module pet\n");
+    await fs.writeFile(path.join(tmpDir, "gen.py"), "");
+
+    const signals = await detectProjectSignals(tmpDir);
+    expect(signals.languages[0]).toBe("go");
+  });
+
+  it("detects Cargo projects and maps Rust onto the cppdbg adapter", async () => {
+    await fs.writeFile(path.join(tmpDir, "Cargo.toml"), '[package]\nname = "wordfreq"\n');
+    const registry = new AdapterRegistry(tmpDir, tmpDir);
+
+    const result = await runDebugDoctor(registry, { cwd: tmpDir });
+    expect(result.detected.languages).toContain("rust");
+    expect(result.recommendedAdapter).toBe("cppdbg");
+  });
+
+  it("detects PHP and Java manifests", async () => {
+    await fs.writeFile(path.join(tmpDir, "composer.json"), "{}");
+    expect((await detectProjectSignals(tmpDir)).languages).toContain("php");
+
+    await fs.rm(path.join(tmpDir, "composer.json"));
+    await fs.writeFile(path.join(tmpDir, "pom.xml"), "<project/>");
+    expect((await detectProjectSignals(tmpDir)).languages).toContain("java");
+  });
+
+  it.each([
+    ["main.rs", "cppdbg"],
+    ["cart.php", "php"],
+    ["Bank.java", "java"],
+  ])("selects the adapter for a %s breakpoint file", async (file, adapter) => {
+    const registry = new AdapterRegistry(tmpDir, tmpDir);
+    const resolved = await resolveProjectAdapter(registry, {
+      cwd: tmpDir,
+      sourceFile: path.join(tmpDir, file),
+    });
+    expect(resolved.result.recommendedAdapter).toBe(adapter);
+  });
+
+  it("tells the agent how to get a first stop in a Java project", async () => {
+    await fs.writeFile(path.join(tmpDir, "pom.xml"), "<project/>");
+    const registry = new AdapterRegistry(tmpDir, tmpDir);
+    registry.register({ type: "java", program: process.execPath });
+
+    const result = await runDebugDoctor(registry, { cwd: tmpDir });
+    expect(result.ready).toBe(true);
+    expect(result.nextSteps.join("\n")).toMatch(/agentlib:jdwp.*debug_attach/s);
+  });
+
   it("returns remediation when no language can be inferred", async () => {
     const registry = new AdapterRegistry(tmpDir, tmpDir);
     const result = await runDebugDoctor(registry, { cwd: tmpDir });

@@ -24,6 +24,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { inspectAdapterAvailability } from "../adapters/detect.js";
+import { adapterUsageNote } from "../adapters/recipes.js";
 import { AdapterConfig } from "../dap/types.js";
 
 export interface ProjectSignals {
@@ -52,7 +53,10 @@ export interface DoctorResult {
   ready: boolean;
   recommendedAdapter?: string;
   detected: ProjectSignals;
+  /** The selected adapter only, unless the caller asked for a verbose report. */
   adapters: DoctorAdapter[];
+  /** Compact roster of the adapters left out of `adapters`, e.g. "go (missing)". */
+  otherAdapters?: string[];
   nextSteps: string[];
 }
 
@@ -96,35 +100,86 @@ function packageNames(pkg: Record<string, unknown> | undefined): Set<string> {
   return names;
 }
 
+const EXTENSION_LANGUAGES: Record<string, string> = {
+  ".py": "python",
+  ".js": "node",
+  ".jsx": "node",
+  ".mjs": "node",
+  ".cjs": "node",
+  ".ts": "node",
+  ".tsx": "node",
+  ".go": "go",
+  ".c": "cppdbg",
+  ".cc": "cppdbg",
+  ".cpp": "cppdbg",
+  ".cxx": "cppdbg",
+  ".h": "cppdbg",
+  ".hpp": "cppdbg",
+  ".rs": "rust",
+  ".php": "php",
+  ".java": "java",
+};
+
+const MANIFEST_LANGUAGES: Array<[string, string]> = [
+  ["pyproject.toml", "python"],
+  ["requirements.txt", "python"],
+  ["setup.py", "python"],
+  ["go.mod", "go"],
+  ["Cargo.toml", "rust"],
+  ["composer.json", "php"],
+  ["pom.xml", "java"],
+  ["build.gradle", "java"],
+  ["build.gradle.kts", "java"],
+  ["CMakeLists.txt", "cppdbg"],
+];
+
+/** Languages debugged through an adapter whose type differs from the language name. */
+const LANGUAGE_ADAPTERS: Record<string, string> = {
+  rust: "cppdbg",
+};
+
+function languageOf(filePath: string): string | undefined {
+  return EXTENSION_LANGUAGES[path.extname(filePath).toLowerCase()];
+}
+
+/**
+ * Fallback for manifest-less projects (scripts, pet projects): rank languages
+ * by how many source files sit in cwd and cwd/src.
+ */
+async function looseSourceLanguages(cwd: string): Promise<string[]> {
+  const counts = new Map<string, number>();
+  for (const dir of [cwd, path.join(cwd, "src")]) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const language = entry.isFile() ? languageOf(entry.name) : undefined;
+      if (language) counts.set(language, (counts.get(language) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([language]) => language);
+}
+
 export async function detectProjectSignals(
   cwd: string,
   sourceFile?: string
 ): Promise<ProjectSignals> {
   const languages = new Set<string>();
   const testFrameworks = new Set<string>();
-  const extension = sourceFile ? path.extname(sourceFile).toLowerCase() : "";
 
-  if (extension === ".py") languages.add("python");
-  if ([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"].includes(extension)) {
-    languages.add("node");
-  }
-  if (extension === ".go") languages.add("go");
-  if ([".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"].includes(extension)) {
-    languages.add("cppdbg");
-  }
+  const sourceLanguage = sourceFile ? languageOf(sourceFile) : undefined;
+  if (sourceLanguage) languages.add(sourceLanguage);
 
-  if (
-    (await exists(path.join(cwd, "pyproject.toml"))) ||
-    (await exists(path.join(cwd, "requirements.txt"))) ||
-    (await exists(path.join(cwd, "setup.py")))
-  ) {
-    languages.add("python");
+  for (const [manifest, language] of MANIFEST_LANGUAGES) {
+    if (await exists(path.join(cwd, manifest))) languages.add(language);
   }
-  if (await exists(path.join(cwd, "go.mod"))) languages.add("go");
 
   const pkg = await readPackageJson(cwd);
   const deps = packageNames(pkg);
   if (pkg) languages.add("node");
+  if (languages.size === 0) {
+    for (const language of await looseSourceLanguages(cwd)) languages.add(language);
+  }
   if (deps.has("vitest")) testFrameworks.add("vitest");
   if (deps.has("jest") || deps.has("@jest/core")) testFrameworks.add("jest");
   if (deps.has("mocha")) testFrameworks.add("mocha");
@@ -163,12 +218,8 @@ async function resolveNodeProgram(cwd: string): Promise<string | undefined> {
 }
 
 function preferredAdapter(signals: ProjectSignals, sourceFile?: string): string | undefined {
-  const extension = sourceFile ? path.extname(sourceFile).toLowerCase() : "";
-  if (extension === ".py") return "python";
-  if ([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"].includes(extension)) return "node";
-  if (extension === ".go") return "go";
-  if ([".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"].includes(extension)) return "cppdbg";
-  return signals.languages[0];
+  const language = (sourceFile ? languageOf(sourceFile) : undefined) ?? signals.languages[0];
+  return language ? LANGUAGE_ADAPTERS[language] ?? language : undefined;
 }
 
 export async function resolveProjectAdapter(
@@ -226,6 +277,14 @@ export async function resolveProjectAdapter(
       nextSteps.push(`Install debugpy in the project environment: ${detected.pythonPath} -m pip install debugpy`);
     }
   }
+  if (selected?.available) {
+    // Rust rides on cppdbg, so look the note up by language before adapter.
+    const language = detected.languages.find(
+      (name) => (LANGUAGE_ADAPTERS[name] ?? name) === selected.type && adapterUsageNote(name)
+    );
+    const note = adapterUsageNote(language ?? selected.type);
+    if (note) nextSteps.push(note);
+  }
   if (detected.launchJson) {
     nextSteps.push(`A launch configuration is available at ${detected.launchJson}; pass its adapter-specific fields through launchConfig when needed.`);
   }
@@ -243,9 +302,22 @@ export async function resolveProjectAdapter(
   };
 }
 
+/** Drop the per-adapter detail an agent rarely needs, keeping a one-line roster. */
+export function conciseDoctorResult(result: DoctorResult): DoctorResult {
+  const others = result.adapters.filter((adapter) => !adapter.selected);
+  return {
+    ...result,
+    adapters: result.adapters.filter((adapter) => adapter.selected),
+    otherAdapters: others.map((adapter) =>
+      adapter.available ? adapter.type : `${adapter.type} (missing)`
+    ),
+  };
+}
+
 export async function runDebugDoctor(
   registry: AdapterRegistry,
-  options: { cwd?: string; adapter?: string } = {}
+  options: { cwd?: string; adapter?: string; verbose?: boolean } = {}
 ): Promise<DoctorResult> {
-  return (await resolveProjectAdapter(registry, options)).result;
+  const { result } = await resolveProjectAdapter(registry, options);
+  return options.verbose ? result : conciseDoctorResult(result);
 }

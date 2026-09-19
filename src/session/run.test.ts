@@ -62,6 +62,22 @@ describe("runDebugRun", () => {
     expect(sessions.listAll()).toHaveLength(0);
   });
 
+  it("reports the debuggee exit code", async () => {
+    const { registry, sessions } = freshSetup();
+    const result = await runDebugRun(registry, sessions, {
+      adapter: "mock",
+      program: "/test/app.py",
+      timeout: 5000,
+      adapterConfig: {
+        type: "mock",
+        runtime: "node",
+        program: MOCK_ADAPTER,
+      },
+    });
+
+    expect(result.exitCode).toBe(3);
+  });
+
   it("rejects when adapter is unknown and no inline config provided", async () => {
     const { registry, sessions } = freshSetup();
     await expect(

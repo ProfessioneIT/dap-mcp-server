@@ -54,18 +54,22 @@ let seq = 1;
 let currentLine = 1;
 let breakpointCount = 0;
 let stopOnEntry = false;
+let exceptionFilters = [];
 
 function handleMessage(msg) {
   if (msg.type !== "request") return;
   switch (msg.command) {
     case "initialize":
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "initialize", success: true,
-        body: { supportsConfigurationDoneRequest: true, supportsEvaluateForHovers: true } });
+        body: { supportsConfigurationDoneRequest: true, supportsEvaluateForHovers: true, supportsExceptionInfoRequest: true } });
       send({ seq: seq++, type: "event", event: "initialized", body: {} });
       break;
     case "setBreakpoints":
-      breakpointCount += (msg.arguments.breakpoints || []).length;
-      const provisional = (msg.arguments.source?.path || "").includes("provisional");
+      // "unbound" sources model a debugger that never attaches to the runtime
+      // (e.g. PHP without xdebug): unverified, and the program runs past them.
+      const unbound = (msg.arguments.source?.path || "").includes("unbound");
+      if (!unbound) breakpointCount += (msg.arguments.breakpoints || []).length;
+      const provisional = unbound || (msg.arguments.source?.path || "").includes("provisional");
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "setBreakpoints", success: true,
         body: { breakpoints: (msg.arguments.breakpoints || []).map((bp, i) => ({
           id: i+1,
@@ -75,6 +79,7 @@ function handleMessage(msg) {
         })) } });
       break;
     case "setExceptionBreakpoints":
+      exceptionFilters = msg.arguments.filters || [];
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "setExceptionBreakpoints", success: true, body: {} });
       break;
     case "configurationDone":
@@ -83,11 +88,16 @@ function handleMessage(msg) {
       // and breakpoints were set, the program runs and hits the first breakpoint.
       if (!stopOnEntry && breakpointCount > 0) {
         setTimeout(() => { send({ seq: seq++, type: "event", event: "stopped", body: { reason: "breakpoint", threadId: 1, allThreadsStopped: true } }); }, 50);
+      } else if (!stopOnEntry && exceptionFilters.length > 0) {
+        // Exception breakpoints armed: the program raises and the adapter stops on it.
+        setTimeout(() => { send({ seq: seq++, type: "event", event: "stopped", body: { reason: "exception", description: "Paused on exception", text: "ValueError", threadId: 1, allThreadsStopped: true } }); }, 50);
       } else if (!stopOnEntry && breakpointCount === 0) {
         // No breakpoints, no stop-on-entry: program runs to completion and terminates.
+        // Like several real adapters, `exited` trails `terminated`.
         setTimeout(() => {
           send({ seq: seq++, type: "event", event: "output", body: { category: "stdout", output: "Program completed\n" } });
           send({ seq: seq++, type: "event", event: "terminated", body: {} });
+          setTimeout(() => { send({ seq: seq++, type: "event", event: "exited", body: { exitCode: 3 } }); }, 20);
         }, 50);
       }
       break;
@@ -116,6 +126,7 @@ function handleMessage(msg) {
         body: { scopes: [
           { name: "Locals", variablesReference: 100, expensive: false },
           { name: "Globals", variablesReference: 200, expensive: true },
+          { name: "Registers", variablesReference: 400, presentationHint: "registers", expensive: false },
         ] } });
       break;
     case "variables":
@@ -133,9 +144,20 @@ function handleMessage(msg) {
             { name: "1", value: "2", type: "int", variablesReference: 0 },
             { name: "2", value: "3", type: "int", variablesReference: 0 },
           ] } });
+      } else if (msg.arguments.variablesReference === 400) {
+        send({ seq: seq++, type: "response", request_seq: msg.seq, command: "variables", success: true,
+          body: { variables: [
+            { name: "rax", value: "0x0000000000000000", type: "unsigned long", variablesReference: 0 },
+            { name: "rip", value: "0x0000000000400473", type: "unsigned long", variablesReference: 0 },
+          ] } });
       } else {
         send({ seq: seq++, type: "response", request_seq: msg.seq, command: "variables", success: true, body: { variables: [] } });
       }
+      break;
+    case "exceptionInfo":
+      send({ seq: seq++, type: "response", request_seq: msg.seq, command: "exceptionInfo", success: true,
+        body: { exceptionId: "ValueError", description: "bad value", breakMode: "unhandled",
+          details: { typeName: "ValueError", message: "bad value", stackTrace: "Traceback (most recent call last): ..." } } });
       break;
     case "evaluate":
       send({ seq: seq++, type: "response", request_seq: msg.seq, command: "evaluate", success: true,

@@ -79,6 +79,19 @@ describe("AdapterRegistry", () => {
     expect(node?.portMatcher).toBeDefined();
   });
 
+  it("gives a user-configured php adapter the builtin xdebug launch recipe", () => {
+    registry.register(
+      { type: "php", runtime: "node", program: "/opt/php-debug/out/phpDebug.js" },
+      "global"
+    );
+    const php = registry.get("php");
+    expect(php?.program).toBe("/opt/php-debug/out/phpDebug.js");
+    expect(php?.launchDefaults?.port).toBe(9003);
+    expect(php?.launchDefaults?.runtimeArgs).toEqual(
+      expect.arrayContaining(["-dxdebug.mode=debug", "-dxdebug.start_with_request=yes"])
+    );
+  });
+
   it("saves and loads config from disk", async () => {
     registry.register({ type: "ruby", program: "/usr/bin/rdbg" });
     await registry.save("project");

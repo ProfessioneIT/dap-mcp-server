@@ -108,6 +108,31 @@ describe("runDebugInspect", () => {
     expect(result.breakpoint?.message).toBeUndefined();
   });
 
+  it("hints at the missing runtime hookup when PHP runs past an unbound breakpoint", async () => {
+    const registry = new AdapterRegistry(
+      path.join(os.tmpdir(), `dap-test-${Date.now()}-global`),
+      path.join(os.tmpdir(), `dap-test-${Date.now()}-project`)
+    );
+    const sessions = new SessionManager();
+
+    const result = await runDebugInspect(registry, sessions, {
+      adapter: "php",
+      program: "/test/unbound.php",
+      at: { file: "/test/unbound.php", line: 5 },
+      timeout: 5000,
+      adapterConfig: {
+        type: "php",
+        runtime: "node",
+        program: MOCK_ADAPTER,
+      },
+    });
+
+    expect(result.hit).toBe(false);
+    expect(result.status).toBe("terminated");
+    expect(result.exitCode).toBe(3);
+    expect(result.hint).toMatch(/xdebug/i);
+  });
+
   it("rejects when adapter is unknown and no inline config provided", async () => {
     const registry = new AdapterRegistry(
       path.join(os.tmpdir(), `dap-test-${Date.now()}-global`),

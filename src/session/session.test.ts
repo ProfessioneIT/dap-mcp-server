@@ -139,6 +139,90 @@ describe("DebugSession", () => {
     });
   });
 
+  async function stoppedOnEntry(id: string): Promise<DebugSession> {
+    const stopped = new DebugSession(id, { type: "mock", runtime: "node", program: MOCK_ADAPTER });
+    await stopped.initialize();
+    await stopped.launch({ program: "example.py", stopOnEntry: true });
+    await stopped.configurationDone();
+    await stopped.waitForStopped(2000);
+    return stopped;
+  }
+
+  it("leaves CPU registers out of the state unless they are asked for", async () => {
+    session = await stoppedOnEntry("test-registers");
+
+    const state = await session.collectState();
+    expect(state.scopes.map((s) => s.name)).toEqual(["Locals", "Globals"]);
+    expect(state.omittedScopes).toEqual(["Registers"]);
+
+    const withRegisters = await session.collectState(undefined, 10, 1, { scopes: ["registers"] });
+    expect(withRegisters.scopes.map((s) => s.name)).toEqual(["Registers"]);
+    expect(withRegisters.scopes[0].variables.map((v) => v.name)).toContain("rax");
+  });
+
+  it("fetches only frame-local scopes when localsOnly is set", async () => {
+    session = await stoppedOnEntry("test-locals-only");
+
+    const state = await session.collectState(undefined, 10, 1, { localsOnly: true });
+    expect(state.scopes.map((s) => s.name)).toEqual(["Locals"]);
+    expect(state.omittedScopes).toEqual(["Globals", "Registers"]);
+  });
+
+  it("reports output once: a consumed state is followed only by newer output", async () => {
+    session = await stoppedOnEntry("test-incremental-output");
+
+    const peek = await session.collectState();
+    expect(peek.output).toEqual(["Program started\n"]);
+    const first = await session.collectState(undefined, 10, 1, { consumeOutput: true });
+    expect(first.output).toEqual(["Program started\n"]);
+
+    session.addOutput("stdout", "after the step\n");
+    const second = await session.collectState(undefined, 10, 1, { consumeOutput: true });
+    expect(second.output).toEqual(["after the step\n"]);
+
+    const third = await session.collectState(undefined, 10, 1, { consumeOutput: true });
+    expect(third.output).toBeUndefined();
+    // The full buffer stays available through get_output.
+    expect(session.getOutput().output).toHaveLength(2);
+  });
+
+  it("caps the output carried by a state and says how much it left out", async () => {
+    session = await stoppedOnEntry("test-output-cap");
+    for (let i = 0; i < 80; i++) session.addOutput("console", `log ${i}\n`);
+
+    const state = await session.collectState();
+    expect(state.output).toHaveLength(50);
+    expect(state.output?.at(-1)).toBe("log 79\n");
+    expect(state.outputOmitted).toBe(31);
+  });
+
+  it("describes the exception when stopped on one", async () => {
+    session = new DebugSession("test-exception", { type: "mock", runtime: "node", program: MOCK_ADAPTER });
+    await session.initialize();
+    await session.launch({ program: "example.py", stopOnEntry: false });
+    await session.setExceptionBreakpoints(["uncaught"]);
+    await session.configurationDone();
+    await session.waitForStopped(2000);
+
+    const state = await session.collectState();
+    expect(state.reason).toBe("exception");
+    expect(state.exception).toEqual({
+      id: "ValueError",
+      description: "bad value",
+      breakMode: "unhandled",
+    });
+  });
+
+  it("records the debuggee exit code even when exited trails terminated", async () => {
+    session = new DebugSession("test-exit-code", { type: "mock", runtime: "node", program: MOCK_ADAPTER });
+    await session.initialize();
+    await session.launch({ program: "example.py", stopOnEntry: false });
+    await session.configurationDone();
+    await session.waitForStopOrTermination(1000);
+
+    expect(await session.waitForExitCode(500)).toBe(3);
+  });
+
   it("returns stopped state from the combined lifecycle wait", async () => {
     session = new DebugSession("test-stopped-outcome", {
       type: "mock",

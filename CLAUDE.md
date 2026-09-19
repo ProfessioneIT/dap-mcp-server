@@ -28,7 +28,9 @@ Three layers, top to bottom:
 
 3. **DAP Layer** (`src/dap/`) — `DAPClient` spawns adapter as child process, communicates via stdin/stdout using DAP wire protocol (Content-Length headers + JSON bodies, same framing as LSP). `MessageParser` handles incremental parsing. `DAPClient` extends `EventEmitter`, emitting DAP events and tracking pending request/response correlation by sequence number.
 
-4. **Adapters** (`src/adapters/`) — `AdapterRegistry` with three tiers: builtins (`builtin.ts`) < global (`~/.dap-mcp/adapters.json`) < project (`./.dap-mcp/adapters.json`). Higher tiers override lower. `detect.ts` checks adapter binary availability via `which`/`where`.
+4. **Adapters** (`src/adapters/`) — `AdapterRegistry` with three tiers: builtins (`builtin.ts`) < global (`~/.dap-mcp/adapters.json`) < project (`./.dap-mcp/adapters.json`). Higher tiers override lower. `detect.ts` checks adapter binary availability via `which`/`where`. `recipes.ts` owns `buildLaunchArgs()` — the single place launch arguments are assembled for `debug_launch`, `debug_inspect`/`debug_at` and `debug_run` (merge order: `launchDefaults` < `launchConfig` < explicit fields, then per-adapter recipes such as Rust LLDB formatters and delve's `dlvCwd`) — plus failure hints and the usage notes `debug_doctor` prints.
+
+5. **Diagnostics** (`src/diagnostics/doctor.ts`) — language detection (manifests → breakpoint file extension → loose source files in `cwd`/`cwd/src`) and adapter readiness. `LANGUAGE_ADAPTERS` maps languages onto a differently-named adapter (Rust → `cppdbg`).
 
 ### Request Lifecycle
 
@@ -58,8 +60,9 @@ Events flow the reverse direction: adapter emits events → `DAPClient` re-emits
 1. **Coarse-grained tools**: `get_state` returns threads+stack+scopes+variables in one call to minimize AI agent round-trips
 2. **Synchronous stepping**: `step` blocks until stopped, returns new state
 3. **Auto-session resolution**: `sessionId` optional when single session active
-4. **Output ring buffer**: 10K lines max, oldest dropped
-5. **Own DAP client**: Custom implementation (not `@vscode/debugadapter-testsupport`) for full control over event buffering and crash detection
+4. **Output ring buffer**: 10K lines max, oldest dropped. State responses carry only output not yet reported (`DebugSession.unreportedOutput`); `debug_launch`/`step`/`debug_restart` consume it, read-only `get_state` does not
+5. **Token-budgeted responses**: register scopes are skipped unless named (`CollectStateOptions.scopes`), `step` defaults to `detail: "compact"` (`src/session/state-format.ts`), doctor/not-ready output is concise by default
+6. **Own DAP client**: Custom implementation (not `@vscode/debugadapter-testsupport`) for full control over event buffering and crash detection
 
 ## CI/CD
 

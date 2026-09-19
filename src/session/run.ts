@@ -24,6 +24,7 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { DebugSession } from "./session.js";
 import { AdapterConfig } from "../dap/types.js";
+import { buildLaunchArgs } from "../adapters/recipes.js";
 
 export interface RunOptions {
   adapter: string;
@@ -40,6 +41,8 @@ export interface RunOptions {
 
 export interface RunResult {
   terminated: boolean;
+  /** Debuggee exit code, when the adapter reports one. */
+  exitCode?: number;
   output: string[];
   status: string;
 }
@@ -72,18 +75,14 @@ export async function runDebugRun(
   try {
     await session.initialize();
 
-    const launchArgs: Record<string, unknown> = {
-      ...config.launchDefaults,
+    const launchArgs = await buildLaunchArgs(config, {
       program: opts.program,
+      args: opts.args,
+      cwd: opts.cwd,
+      env: opts.env,
       stopOnEntry: false,
-    };
-    if (opts.args !== undefined) launchArgs.args = opts.args;
-    if (opts.cwd !== undefined) launchArgs.cwd = opts.cwd;
-    if (opts.env !== undefined) launchArgs.env = opts.env;
-    // delve: mirror cwd → dlvCwd so `go build` finds go.mod from the right dir.
-    if (config.type === "go" && opts.cwd !== undefined && launchArgs.dlvCwd === undefined) {
-      launchArgs.dlvCwd = opts.cwd;
-    }
+      sourceFiles: opts.logpoints?.map((lp) => lp.file),
+    });
 
     const launchPromise = session.launch(launchArgs);
     // Suppress unhandled rejection: the real `await launchPromise` below will
@@ -120,9 +119,12 @@ export async function runDebugRun(
       if (outcome.status === "timeout") break;
     }
 
+    const terminated = session.state === "terminated";
+    const exitCode = terminated ? await session.waitForExitCode() : undefined;
     const { output } = session.getOutput();
     return {
-      terminated: session.state === "terminated",
+      terminated,
+      exitCode,
       output: output.map((e) => e.text),
       status: session.state,
     };
