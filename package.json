@@ -22,7 +22,8 @@
   "files": [
     "build",
     "SKILL.md",
-    "integrations/claude/dap-debugging"
+    "integrations/claude/dap-debugging",
+    "integrations/codex"
   ],
   "directories": {
     "doc": "docs"

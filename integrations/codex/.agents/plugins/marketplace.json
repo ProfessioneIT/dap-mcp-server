@@ -1,0 +1,20 @@
+{
+  "name": "dap-mcp-server",
+  "interface": {
+    "displayName": "DAP MCP Server"
+  },
+  "plugins": [
+    {
+      "name": "dap-debugging",
+      "source": {
+        "source": "local",
+        "path": "./dap-debugging"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

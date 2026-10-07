@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dap-debugging",
+  "version": "0.1.0",
+  "description": "Debug local programs with standard Debug Adapter Protocol adapters.",
+  "author": {
+    "name": "Ivan Iraci"
+  },
+  "license": "MIT",
+  "keywords": [
+    "debugging",
+    "dap",
+    "mcp",
+    "codex"
+  ]
+}

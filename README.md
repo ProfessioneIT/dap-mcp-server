@@ -71,6 +71,57 @@ npm install
 npm run build
 ```
 
+## Usage with Codex
+
+Choose either direct MCP registration or the plugin; installing both exposes the same
+debugger twice. The plugin also supplies the activation skill.
+
+### Direct MCP registration
+
+Register the stdio server in Codex CLI (the CLI and IDE extension share this configuration):
+
+```bash
+codex mcp add dap -- npx -y dap-mcp-server
+codex mcp list
+```
+
+For a source checkout, build first and register the absolute entry-point path instead:
+
+```bash
+npm ci
+npm run build
+codex mcp add dap -- node "$(pwd)/build/index.js"
+```
+
+Direct registration exposes the tools but does not install the activation skill. To add
+the skill to a project after a global npm install:
+
+```bash
+mkdir -p .agents/skills/dap-debugging
+cp "$(npm root -g)/dap-mcp-server/SKILL.md" .agents/skills/dap-debugging/SKILL.md
+```
+
+### Plugin: MCP server and activation skill
+
+The npm package also ships a Codex plugin that bundles the MCP declaration with the
+`dap-debugging` activation skill. After a global install, register its marketplace and
+install the plugin:
+
+```bash
+npm install -g dap-mcp-server
+codex plugin marketplace add "$(npm root -g)/dap-mcp-server/integrations/codex"
+codex plugin add dap-debugging@dap-mcp-server
+```
+
+From a source checkout, the marketplace path is `"$(pwd)/integrations/codex"`. The
+plugin launches the published npm server via `npx`; use direct registration with
+`build/index.js` to test changes to the server itself.
+
+Start a new Codex session after installation. Ask Codex to run `debug_doctor` with the
+project's absolute `cwd`, then use `debug_at` for one-shot breakpoint inspection.
+The activation skill provides this workflow when installed. Debug adapters must still
+be installed separately (see the supported-adapters table above).
+
 ## Usage with Claude Code
 
 Register the server for the current user:
