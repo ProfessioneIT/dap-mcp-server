@@ -53,9 +53,9 @@ function readPackageVersion(): string {
   }
 }
 
-export function createServer(): McpServer {
-  const globalDir = path.join(os.homedir(), ".dap-mcp");
-  const projectDir = path.join(process.cwd(), ".dap-mcp");
+export function createServer(options: { globalDir?: string; projectDir?: string } = {}): McpServer {
+  const globalDir = options.globalDir ?? path.join(os.homedir(), ".dap-mcp");
+  const projectDir = options.projectDir ?? path.join(process.cwd(), ".dap-mcp");
 
   const registry = new AdapterRegistry(globalDir, projectDir);
   const sessions = new SessionManager();
@@ -334,10 +334,10 @@ export function createServer(): McpServer {
             (key) => options.launchConfig?.[key] !== undefined
           );
         const compiledProgram =
-          !options.program && !hasLaunchTarget && adapter === "cppdbg"
+          !options.program && !hasLaunchTarget && ["cppdbg", "gdb"].includes(adapter)
             ? await defaultCargoProgram(cwd)
             : undefined;
-        if (!options.program && !hasLaunchTarget && adapter === "cppdbg" && !compiledProgram) {
+        if (!options.program && !hasLaunchTarget && ["cppdbg", "gdb"].includes(adapter) && !compiledProgram) {
           return {
             content: [
               {
