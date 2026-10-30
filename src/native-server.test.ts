@@ -73,6 +73,29 @@ describe("native compiled targets over MCP", () => {
     expect(result.structuredContent).toMatchObject({ hit: true });
   });
 
+  it.skipIf(process.platform !== "linux")("auto-selects ready GDB and cleans up plain-expression inspection", async () => {
+    const result = await client.callTool({ name: "debug_at", arguments: {
+      cwd: tmp, program: "/test/pet", file: path.join(tmp, "main.rs"), line: 5, expressions: ["x", "bad"],
+    } });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ adapter: "gdb", hit: true, values: { x: { result: "42", type: "i32" }, bad: { error: expect.any(String) } } });
+    const sessions = await client.readResource({ uri: "dap://sessions" });
+    expect(JSON.parse((sessions.contents[0] as { text: string }).text)).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== "linux")("falls back before launch but honors explicit unavailable GDB", async () => {
+    await client.callTool({ name: "configure_adapter", arguments: { type: "gdb", program: path.join(tmp, "missing-gdb") } });
+    const args = { cwd: tmp, program: "/test/pet", file: path.join(tmp, "main.rs"), line: 5, expressions: ["x"] };
+    const result = await client.callTool({ name: "debug_at", arguments: args });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ adapter: "cppdbg", hit: true, values: { x: { result: "42" } } });
+    const explicit = await client.callTool({ name: "debug_at", arguments: { ...args, adapter: "gdb" } });
+    expect(explicit.isError).toBe(true);
+    expect(JSON.stringify(explicit.content)).toMatch(/not ready/);
+    const sessions = await client.readResource({ uri: "dap://sessions" });
+    expect(JSON.parse((sessions.contents[0] as { text: string }).text)).toEqual([]);
+  });
+
   it("lists resolved verification without losing requested breakpoint information", async () => {
     const launch = await client.callTool({ name: "debug_launch", arguments: {
       adapter: "gdb", program: "/test/pet", breakpoints: [{ file: "/test/app.rs", line: 5, condition: "x == 42" }],

@@ -18,7 +18,8 @@ Any DAP-compliant debug adapter works. Built-in defaults for:
 | Go | Delve | `go install github.com/go-delve/delve/cmd/dlv@latest` |
 | Node.js / TypeScript | vscode-js-debug | Configure its `dapDebugServer.js` path or install it in the project |
 | C/C++ | lldb-dap | `apt install lldb` / `brew install llvm` |
-| Rust | lldb-dap (same `cppdbg` adapter) | as above, plus the Rust LLDB formatters (bundled with rustup toolchains; the `rust-lldb` package on distro-packaged Rust) |
+| Rust on Linux | GDB native DAP (`gdb`); LLDB fallback (`cppdbg`) | GDB with Python and native DAP support; optional matching `rust-gdb` integration |
+| Rust on other platforms | lldb-dap (`cppdbg`) | LLVM/LLDB, plus matching Rust LLDB formatters |
 | PHP | vscode-php-debug + xdebug 3 | Install xdebug, then point the `php` adapter's `program` at `out/phpDebug.js` |
 
 Additional adapters, and project-specific paths for the built-ins, can be registered via `configure_adapter` or config files.
@@ -28,11 +29,51 @@ Additional adapters, and project-specific paths for the built-ins, can be regist
 The per-language incantations that usually stand between an agent and its first breakpoint ship with the server:
 
 - **PHP** — the `php` adapter's `launchDefaults` carry the xdebug `runtimeArgs` and listen port. They are merged into a user-configured `php` entry, so you only supply the `phpDebug.js` path. If PHP still runs past a breakpoint, the result carries a `hint` pointing at xdebug.
-- **Rust** — sessions that break in `.rs` files load `lldb_lookup.py` from the active toolchain's sysroot, so `String`, `&str`, `Vec` and `HashMap` render as values instead of raw structs. `debug_at` defaults `program` to `target/debug/<package name>`.
+- **Rust** — GDB sessions load installed Rust GDB pretty-printers before initialization when available; LLDB sessions that break in `.rs` files load `lldb_lookup.py`. `debug_at` defaults `program` to `target/debug/<package name>`. For virtual Cargo workspaces, test executables, or custom target directories, pass the compiled executable explicitly.
 - **Go** — `cwd` is mirrored to `dlvCwd` so delve builds from the module directory.
 - **Java / JDWP** — `debug_doctor` prints the `-agentlib:jdwp=…` line to start the JVM with; `debug_attach` accepts `breakpoints` so they bind before a `suspend=y` VM resumes.
 
 `debug_doctor` and `debug_at` detect the language from manifests (`pyproject.toml`, `go.mod`, `Cargo.toml`, `composer.json`, `pom.xml`, `build.gradle`, `CMakeLists.txt`, `package.json`), from the breakpoint file's extension, and — for manifest-less script directories — from the source files in `cwd` and `cwd/src`.
+
+### Rust: choosing GDB or LLDB
+
+On Linux, `debug_doctor` and `debug_at` prefer GDB after a bounded DAP
+`initialize` check of the configured command (`gdb --nx --quiet --interpreter=dap`).
+A GDB executable without working Python/DAP support is unavailable. Automatic
+selection falls back to LLDB **before launching the target**; a launch or runtime
+failure never reruns the program with another debugger. An explicit `adapter`
+always wins, including when that adapter is unavailable. C/C++ and other-platform
+defaults are unchanged; interactive tools still take an explicit adapter.
+
+```json
+{
+  "cwd": "/workspace/rust-project",
+  "adapter": "cppdbg",
+  "program": "/workspace/rust-project/target/debug/app",
+  "file": "/workspace/rust-project/src/main.rs",
+  "line": 42,
+  "expressions": ["count"]
+}
+```
+
+Pass this to `debug_at` to choose LLDB; omit `adapter` for automatic selection,
+or use `"gdb"` explicitly. Compile with debug information (`cargo build` or
+`cargo test --no-run`); the program must be an executable, not an `.rs` file.
+
+Automatic inspection evaluates expressions with DAP context `watch`. The
+interactive `evaluate` tool retains its `repl` default: with GDB, use
+`context: "watch"` for `count` or `count as u32`, and `context: "repl"` for
+debugger commands such as `print count`. Expression syntax depends on the engine;
+LLDB formatters do not add a Rust expression parser.
+
+GDB Rust formatters are optional for `String`, `Vec`, and `HashMap`; scalar
+inspection works without them. Install the matching toolchain's `rust-gdb`
+integration if doctor reports them missing. Automatic loading accepts only the
+installed sysroot's scripts outside the project and rejects escaping symlinks;
+it does not broaden GDB's auto-load safe path. Custom trusted setup can be supplied
+through adapter arguments. GDB launch `env` values override the inherited server
+environment, and local attach translates the common `processId` field to GDB's
+`pid`. Advanced remote/core-dump GDB workflows require adapter-specific setup.
 
 ## MCP Tools
 
