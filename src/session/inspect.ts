@@ -160,7 +160,7 @@ export async function runDebugInspect(
       const topFrameId = state.stackTrace?.[0]?.id;
       for (const expr of opts.expressions) {
         try {
-          const r = await session.evaluate(expr, topFrameId);
+          const r = await session.evaluate(expr, topFrameId, "watch");
           values[expr] = { result: r.result, type: r.type };
         } catch (err) {
           values[expr] = { error: err instanceof Error ? err.message : String(err) };

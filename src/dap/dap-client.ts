@@ -490,6 +490,7 @@ export class DAPClient extends EventEmitter {
           adapterID: (childConfig.type as string | undefined) ?? "child",
           clientID: "dap-mcp-server",
           clientName: "DAP MCP Server",
+          supportsVariableType: true,
           linesStartAt1: true,
           columnsStartAt1: true,
           pathFormat: "path",

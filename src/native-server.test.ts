@@ -72,4 +72,18 @@ describe("native compiled targets over MCP", () => {
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({ hit: true });
   });
+
+  it("lists resolved verification without losing requested breakpoint information", async () => {
+    const launch = await client.callTool({ name: "debug_launch", arguments: {
+      adapter: "gdb", program: "/test/pet", breakpoints: [{ file: "/test/app.rs", line: 5, condition: "x == 42" }],
+    } });
+    const payload = JSON.parse((launch.content as Array<{ text: string }>)[0].text);
+    try {
+      const listed = await client.callTool({ name: "list_breakpoints", arguments: { sessionId: payload.sessionId } });
+      const result = JSON.parse((listed.content as Array<{ text: string }>)[0].text);
+      expect(result.files[0].breakpoints[0]).toMatchObject({ line: 5, condition: "x == 42", verified: true });
+    } finally {
+      await client.callTool({ name: "debug_disconnect", arguments: { sessionId: payload.sessionId } });
+    }
+  });
 });

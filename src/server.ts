@@ -1328,7 +1328,13 @@ export function createServer(options: { globalDir?: string; projectDir?: string 
         const bps = session.getBreakpoints();
         const files = Array.from(bps.entries()).map(([file, breakpoints]) => ({
           file,
-          breakpoints,
+          breakpoints: breakpoints.map((requested, index) => {
+            const resolved = session.getBreakpointResults().get(file)?.[index];
+            return resolved ? {
+              ...requested, id: resolved.id, verified: resolved.verified,
+              resolvedLine: resolved.line, message: resolved.message,
+            } : requested;
+          }),
         }));
         const totalCount = files.reduce((n, f) => n + f.breakpoints.length, 0);
         return {

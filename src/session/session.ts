@@ -62,6 +62,7 @@ export class DebugSession {
   private nextOutputSeq = 1;
   private lastReportedOutputSeq = 0;
   private breakpointsMap = new Map<string, BreakpointConfig[]>();
+  private breakpointResults = new Map<string, BreakpointResult[]>();
   private capabilities: DebugProtocol.Capabilities = {};
   private stoppedThreadId?: number;
   private stoppedReason?: string;
@@ -129,6 +130,7 @@ export class DebugSession {
         adapterID: this.adapterConfig.type,
         clientID: "dap-mcp-server",
         clientName: "DAP MCP Server",
+        supportsVariableType: true,
         linesStartAt1: true,
         columnsStartAt1: true,
         pathFormat: "path",
@@ -184,12 +186,14 @@ export class DebugSession {
         logMessage: bp.logMessage,
       })),
     });
-    return ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
+    const results = ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
       id: bp.id,
       verified: bp.verified ?? false,
       line: bp.line ?? 0,
       message: bp.message,
     }));
+    this.breakpointResults.set(absPath, results);
+    return results;
   }
 
   async setExceptionBreakpoints(filters: string[]): Promise<void> {
@@ -589,8 +593,27 @@ export class DebugSession {
     return this.breakpointsMap;
   }
 
+  getBreakpointResults(): Map<string, BreakpointResult[]> {
+    return this.breakpointResults;
+  }
+
   private handleEvent(event: DebugProtocol.Event): void {
     switch (event.event) {
+      case "breakpoint": {
+        const body = event.body as DebugProtocol.BreakpointEvent["body"] | undefined;
+        const breakpoint = body?.breakpoint;
+        if (typeof breakpoint?.id !== "number") break;
+        for (const [file, values] of this.breakpointResults) {
+          if (breakpoint.source?.path && breakpoint.source.path !== file) continue;
+          const existing = values.find((value) => value.id === breakpoint.id);
+          if (!existing) continue;
+          existing.verified = body?.reason === "removed" ? false : breakpoint.verified;
+          if (breakpoint.line !== undefined) existing.line = breakpoint.line;
+          existing.message = breakpoint.message;
+          break;
+        }
+        break;
+      }
       case "initialized":
         this._initializedReceived = true;
         for (const resolve of this.initializedResolvers) resolve();
