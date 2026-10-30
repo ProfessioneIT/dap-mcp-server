@@ -1,6 +1,6 @@
 # GDB/DAP Rust Support Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Prefer a verified GDB/DAP adapter for Rust on Linux while retaining LLDB, existing MCP tools, and safe one-shot debugging.
 
@@ -38,11 +38,11 @@
 
 **Interfaces:** Preserve `inspectAdapterAvailability(config: AdapterConfig): Promise<AdapterAvailability>`. Add built-in `type: "gdb"`, `program: "gdb"`, `args: ["--nx", "--quiet", "--interpreter=dap"]`, `transport: "stdio"`. The test fixture speaks real framed DAP and accepts a mode argument for ready, rejected initialization, malformed output, and silence.
 
-- [ ] Write readiness regressions against the real availability function: successful initialize gives `expect(result.available).toBe(true)`; rejected initialization, malformed output, early exit, silence, and a missing executable give `expect(result.available).toBe(false)` and a useful reason. Assert bounded completion and adapter cleanup, not fixture constants.
-- [ ] Run `npx vitest run src/adapters/detect.test.ts`; expected: new GDB readiness cases fail before implementation.
-- [ ] Implement GDB registration and an initialize-only readiness probe using the existing `DAPClient`. Use a 2,000 ms request deadline, bounded startup, an error handler, and `dispose()` in `finally`; never send a target launch. Test the configured command including runtime/arguments, not only `gdb --version`.
-- [ ] Run the focused test and then `npm test`; expected: all tests pass, including unchanged availability checks for existing adapters.
-- [ ] Commit approved design/plan and this task as `feat: add GDB DAP adapter and readiness checks`.
+- [x] Write readiness regressions against the real availability function: successful initialize gives `expect(result.available).toBe(true)`; rejected initialization, malformed output, early exit, silence, and a missing executable give `expect(result.available).toBe(false)` and a useful reason. Assert bounded completion and adapter cleanup, not fixture constants.
+- [x] Run `npx vitest run src/adapters/detect.test.ts`; expected: new GDB readiness cases fail before implementation.
+- [x] Implement GDB registration and an initialize-only readiness probe using the existing `DAPClient`. Use a 2,000 ms request deadline, bounded startup, an error handler, and `dispose()` in `finally`; never send a target launch. Test the configured command including runtime/arguments, not only `gdb --version`.
+- [x] Run the focused test and then `npm test`; expected: all tests pass, including unchanged availability checks for existing adapters.
+- [x] Commit approved design/plan and this task as `feat: add GDB DAP adapter and readiness checks`.
 
 ### Task 2: Rust selection and compiled-program handling
 
@@ -50,12 +50,12 @@
 
 **Interfaces:** Keep MCP argument/output schemas unchanged. Extend the internal resolver to `resolveProjectAdapter(registry, options = {}, platform: NodeJS.Platform = process.platform): Promise<ResolvedProjectAdapter>` for deterministic platform-policy checks. Allow `createServer(options: { globalDir?: string; projectDir?: string } = {})` to construct isolated real registries in MCP tests; defaults remain unchanged.
 
-- [ ] Add resolver tests with real registry/project detection and a controlled availability boundary: Linux Rust chooses ready GDB; unavailable GDB selects LLDB; both unavailable report not-ready and remediation; explicit unavailable GDB does not fall back; explicit LLDB remains LLDB; macOS/Windows Rust and C/C++ retain `cppdbg`; Node/Python/Go/PHP/Java policies remain unchanged.
-- [ ] Add MCP tests with temporary configuration directories. For both native adapters, a built Cargo package resolves its executable; an explicit workspace test binary is retained; a missing executable or virtual workspace without `program` returns an actionable error. Pin the latter with `expect(result.isError).toBe(true)` and no target launch.
-- [ ] Run `npx vitest run src/diagnostics/doctor.test.ts src/server.test.ts`; expected: GDB preference and native-target cases fail before implementation.
-- [ ] Resolve availability before choosing an automatic engine. Preserve explicit selection and configuration layers. Extend compiled-target checks/discovery from `cppdbg` to both `cppdbg` and `gdb`; explain fallback and missing GDB DAP support in doctor output. Do not introduce runtime retry/fallback.
-- [ ] Run focused tests and `npm test`; expected: deterministic selection and no existing-language regressions.
-- [ ] Commit as `feat: prefer ready GDB for Rust on Linux`.
+- [x] Add resolver tests with real registry/project detection and a controlled availability boundary: Linux Rust chooses ready GDB; unavailable GDB selects LLDB; both unavailable report not-ready and remediation; explicit unavailable GDB does not fall back; explicit LLDB remains LLDB; macOS/Windows Rust and C/C++ retain `cppdbg`; Node/Python/Go/PHP/Java policies remain unchanged.
+- [x] Add MCP tests with temporary configuration directories. For both native adapters, a built Cargo package resolves its executable; an explicit workspace test binary is retained; a missing executable or virtual workspace without `program` returns an actionable error. Pin the latter with `expect(result.isError).toBe(true)` and no target launch.
+- [x] Run `npx vitest run src/diagnostics/doctor.test.ts src/server.test.ts`; expected: GDB preference and native-target cases fail before implementation.
+- [x] Resolve availability before choosing an automatic engine. Preserve explicit selection and configuration layers. Extend compiled-target checks/discovery from `cppdbg` to both `cppdbg` and `gdb`; explain fallback and missing GDB DAP support in doctor output. Do not introduce runtime retry/fallback.
+- [x] Run focused tests and `npm test`; expected: deterministic selection and no existing-language regressions.
+- [x] Commit as `feat: prefer ready GDB for Rust on Linux`.
 
 ### Task 3: Expressions and GDB session compatibility
 
@@ -63,13 +63,13 @@
 
 **Interfaces:** Keep `DebugSession.evaluate(expression, frameId?, context = "repl")` and public tool defaults unchanged. Automatic inspection calls `session.evaluate(expr, topFrameId, "watch")`. Both parent and reverse-request child initialization advertise `supportsVariableType: true`. Breakpoint events update existing public breakpoint results by ID/source.
 
-- [ ] Extend the fixture with GDB's documented `repl` versus `watch` behavior, top frame ID `0`, negotiated variable types, and pending-to-verified breakpoint events.
-- [ ] Add a one-shot regression where a plain expression in `repl` is rejected but `watch` succeeds: assert `expect(result.values?.x.result).toBe("42")` and session cleanup. Cover frame ID `0` and per-expression failures without losing other values.
-- [ ] Add session regressions preserving explicit/default console commands, returning negotiated type metadata, and updating a pending breakpoint to its resolved line and verification status. Assert observable session state, not private implementation layout.
-- [ ] Run `npx vitest run src/session/inspect.test.ts src/session/session.test.ts src/dap/dap-client.test.ts`; expected: new context, type-negotiation and breakpoint-event cases fail before implementation.
-- [ ] Implement explicit `watch` for automatic expressions, variable-type negotiation on both initialization paths, and breakpoint event handling. Preserve valid zero IDs and existing console behavior.
-- [ ] Run focused tests and `npm test`; expected: existing and new session lifecycles pass.
-- [ ] Commit as `fix: evaluate one-shot expressions outside debugger consoles`.
+- [x] Extend the fixture with GDB's documented `repl` versus `watch` behavior, top frame ID `0`, negotiated variable types, and pending-to-verified breakpoint events.
+- [x] Add a one-shot regression where a plain expression in `repl` is rejected but `watch` succeeds: assert `expect(result.values?.x.result).toBe("42")` and session cleanup. Cover frame ID `0` and per-expression failures without losing other values.
+- [x] Add session regressions preserving explicit/default console commands, returning negotiated type metadata, and updating a pending breakpoint to its resolved line and verification status. Assert observable session state, not private implementation layout.
+- [x] Run `npx vitest run src/session/inspect.test.ts src/session/session.test.ts src/dap/dap-client.test.ts`; expected: new context, type-negotiation and breakpoint-event cases fail before implementation.
+- [x] Implement explicit `watch` for automatic expressions, variable-type negotiation on both initialization paths, and breakpoint event handling. Preserve valid zero IDs and existing console behavior.
+- [x] Run focused tests and `npm test`; expected: existing and new session lifecycles pass.
+- [x] Commit as `fix: evaluate one-shot expressions outside debugger consoles`.
 
 ### Task 4: Native parameters and trusted Rust formatters
 
@@ -77,12 +77,12 @@
 
 **Interfaces:** Retain `buildLaunchArgs` and add `buildAttachArgs(config: AdapterConfig, options: { processId?: number; host?: string; port?: number; attachConfig?: Record<string, unknown> }): Record<string, unknown>`. Add `prepareNativeAdapterConfig(config: AdapterConfig, options: { cwd?: string; sourceFiles?: string[] }, resolveRustSysroot?: () => Promise<string | undefined>): Promise<AdapterConfig>`; return a prepared configuration without mutating the registry. Invoke preparation before constructing sessions in launch, inspect, run, and attach; restart reuses the saved prepared configuration.
 
-- [ ] Add recipe tests: GDB receives `pid: 42`, existing adapters retain `processId: 42`, and explicit common fields win over configuration defaults. GDB environment overrides retain inherited variables; absent `env` remains absent; unrelated adapters retain current behavior.
-- [ ] Add formatter tests using a fake SDK outside the project: trusted installed GDB formatter setup is added only for Rust/GDB, user arguments remain intact, and the registry object is not mutated. Missing scripts do not block launch. Reject scripts resolving into the project or escaping the trusted SDK through symlinks; quote paths containing spaces/quotes safely. Keep LLDB formatter tests unchanged.
-- [ ] Run `npx vitest run src/adapters/recipes.test.ts src/server.test.ts src/session/inspect.test.ts src/session/run.test.ts`; expected: new GDB preparation and parameter cases fail before implementation.
-- [ ] Implement parameter translation and pre-spawn configuration preparation using the installed Rust toolchain's trusted formatter entry points. Do not send LLDB `initCommands` to GDB, relax auto-load safety globally, or install packages. Add useful doctor remediation when optional GDB Rust formatters are absent.
-- [ ] Test failed preparation/launch cleanup and saved configuration reuse on restart, then run `npm test`; expected: the complete suite passes.
-- [ ] Commit as `feat: normalize GDB native debugging parameters`.
+- [x] Add recipe tests: GDB receives `pid: 42`, existing adapters retain `processId: 42`, and explicit common fields win over configuration defaults. GDB environment overrides retain inherited variables; absent `env` remains absent; unrelated adapters retain current behavior.
+- [x] Add formatter tests using a fake SDK outside the project: trusted installed GDB formatter setup is added only for Rust/GDB, user arguments remain intact, and the registry object is not mutated. Missing scripts do not block launch. Reject scripts resolving into the project or escaping the trusted SDK through symlinks; quote paths containing spaces/quotes safely. Keep LLDB formatter tests unchanged.
+- [x] Run `npx vitest run src/adapters/recipes.test.ts src/server.test.ts src/session/inspect.test.ts src/session/run.test.ts`; expected: new GDB preparation and parameter cases fail before implementation.
+- [x] Implement parameter translation and pre-spawn configuration preparation using the installed Rust toolchain's trusted formatter entry points. Do not send LLDB `initCommands` to GDB, relax auto-load safety globally, or install packages. Add useful doctor remediation when optional GDB Rust formatters are absent.
+- [x] Test failed preparation/launch cleanup and saved configuration reuse on restart, then run `npm test`; expected: the complete suite passes.
+- [x] Commit as `feat: normalize GDB native debugging parameters`.
 
 ### Task 5: Documentation and real stdio acceptance
 
@@ -90,14 +90,14 @@
 
 **Interfaces:** Existing MCP tools remain the acceptance boundary: `debug_doctor`, `debug_at`, `debug_inspect`, `debug_launch`, `evaluate`, `step`, `debug_run`, `debug_restart`, `debug_disconnect`.
 
-- [ ] Add integration regressions for automatic Rust selection into a strict GDB-like adapter, successful plain-expression one-shot inspection, unavailable-GDB fallback, explicit engine selection, and cleanup on failure. Use temporary project/global config directories and no developer-machine paths.
-- [ ] Run the focused integration tests; expected: all acceptance cases pass with the completed implementation, independently of locally installed GDB/LLDB.
-- [ ] Document GDB prerequisites, Linux Rust preference, explicit LLDB selection, `watch` expressions versus `repl` commands, optional formatter requirements, and the no-reexecution fallback policy.
-- [ ] Run `npm test`, `npm run typecheck`, `npm run build`, `git diff --check`, and `npm pack --dry-run`; expected: zero test/type/build failures and a package containing the updated server/documentation, with no generated build files staged.
-- [ ] Start the newly built server via the MCP SDK's stdio client in a temporary working directory. Reuse/build BrewScaler's five calculation tests only under `/tmp`; hash its core/configuration files before and after. Verify doctor, automatic/explicit GDB `debug_at`, `debug_inspect`, Rust casts, conditional breakpoints, stepping, normal exit, restart, disconnect, and the five-test `debug_run`. Repeat scalar one-shot inspection with explicit LLDB.
-- [ ] Exercise GDB local attach on an isolated temporary target when host ptrace policy permits; report policy restrictions rather than relaxing system security. Check `String`, `Vec`, and `HashMap` with trusted formatters if installed; otherwise record the missing prerequisite explicitly.
-- [ ] Perform a fresh whole-branch review and fix important findings with failing regression tests. Expected: no unresolved critical/important findings, passing final suite, unchanged BrewScaler core/configuration hashes, and no lingering sessions from the smoke test.
-- [ ] Commit verified docs/integration coverage as `test: cover GDB and LLDB Rust debugging lifecycles`; leave merge, push, release and global installation for explicit user direction.
+- [x] Add integration regressions for automatic Rust selection into a strict GDB-like adapter, successful plain-expression one-shot inspection, unavailable-GDB fallback, explicit engine selection, and cleanup on failure. Use temporary project/global config directories and no developer-machine paths.
+- [x] Run the focused integration tests; expected: all acceptance cases pass with the completed implementation, independently of locally installed GDB/LLDB.
+- [x] Document GDB prerequisites, Linux Rust preference, explicit LLDB selection, `watch` expressions versus `repl` commands, optional formatter requirements, and the no-reexecution fallback policy.
+- [x] Run `npm test`, `npm run typecheck`, `npm run build`, `git diff --check`, and `npm pack --dry-run`; expected: zero test/type/build failures and a package containing the updated server/documentation, with no generated build files staged.
+- [x] Start the newly built server via the MCP SDK's stdio client in a temporary working directory. Reuse/build BrewScaler's five calculation tests only under `/tmp`; hash its core/configuration files before and after. Verify doctor, automatic/explicit GDB `debug_at`, `debug_inspect`, Rust casts, conditional breakpoints, stepping, normal exit, restart, disconnect, and the five-test `debug_run`. Repeat scalar one-shot inspection with explicit LLDB.
+- [x] Exercise GDB local attach on an isolated temporary target when host ptrace policy permits; report policy restrictions rather than relaxing system security. Check `String`, `Vec`, and `HashMap` with trusted formatters if installed; otherwise record the missing prerequisite explicitly.
+- [x] Perform a fresh whole-branch review and fix important findings with failing regression tests. Expected: no unresolved critical/important findings, passing final suite, unchanged BrewScaler core/configuration hashes, and no lingering sessions from the smoke test.
+- [x] Commit verified docs/integration coverage as `test: cover GDB and LLDB Rust debugging lifecycles`; leave merge, push, release and global installation for explicit user direction.
 
 ## Self-review
 

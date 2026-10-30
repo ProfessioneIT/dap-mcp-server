@@ -24,6 +24,7 @@ import { writeFileSync } from "node:fs";
 
 const mode = process.argv.find((arg) => arg.startsWith("--mode="))?.slice(7) ?? "ready";
 const pidFile = process.argv.find((arg) => arg.startsWith("--pid-file="))?.slice(11);
+const reportedSource = process.argv.find((arg) => arg.startsWith("--event-source="))?.slice(15);
 if (pidFile) writeFileSync(pidFile, String(process.pid));
 if (mode === "exit") process.exit(1);
 let buffer = Buffer.alloc(0);
@@ -34,10 +35,11 @@ let line = 5;
 let source = "/test/app.rs";
 let nextBreakpoint = 1;
 const breakpoints = new Map();
-const send = (message) => {
+const frame = (message) => {
   const json = JSON.stringify({ seq: sequence++, ...message });
-  process.stdout.write("Content-Length: " + Buffer.byteLength(json) + "\r\n\r\n" + json);
+  return "Content-Length: " + Buffer.byteLength(json) + "\r\n\r\n" + json;
 };
+const send = (message) => process.stdout.write(frame(message));
 const event = (name, body) => send({ type: "event", event: name, body });
 const response = (request, body = {}, message) => send({
   type: "response", request_seq: request.seq, command: request.command,
@@ -87,17 +89,22 @@ function handle(request) {
       break;
     case "setBreakpoints": {
       source = args.source.path;
-      const values = args.breakpoints.map((bp) => ({ id: nextBreakpoint++, verified: configured, line: configured ? bp.line : 0 }));
+      const values = args.breakpoints.map((bp, index) => ({ id: mode === "early-breakpoint" ? index : nextBreakpoint++, verified: configured, line: configured ? bp.line : 0 }));
       breakpoints.set(source, args.breakpoints.map((bp, index) => ({ ...values[index], line: bp.line })));
       if (args.breakpoints.length) line = args.breakpoints[0].line;
-      response(request, { breakpoints: values });
+      if (mode === "early-breakpoint" && values.length) {
+        // One write guarantees response and event reach the parser together,
+        // before the awaiting caller resumes to register response results.
+        process.stdout.write(frame({ type: "response", request_seq: request.seq, command: request.command, success: true, body: { breakpoints: values } }) +
+          frame({ type: "event", event: "breakpoint", body: { reason: "changed", breakpoint: { ...values[0], verified: true, line: args.breakpoints[0].line + 1 } } }));
+      } else response(request, { breakpoints: values });
       break;
     }
     case "configurationDone":
       configured = true;
       response(request);
       for (const [file, values] of breakpoints) {
-        for (const bp of values) event("breakpoint", { reason: "changed", breakpoint: { ...bp, verified: true, source: { path: file } } });
+        for (const bp of values) event("breakpoint", { reason: "changed", breakpoint: { ...bp, verified: true, source: { path: reportedSource ?? file } } });
       }
       setTimeout(() => [...breakpoints.values()].some((values) => values.length) ? stop() : finish(), 10);
       break;

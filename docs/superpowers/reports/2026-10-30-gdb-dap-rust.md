@@ -6,7 +6,7 @@ configuration was changed.
 
 ## Automated checks
 
-- `npm test`: 137 passing tests across 18 files.
+- `npm test`: 139 passing tests across 18 files, including final-review regressions.
 - `npm run typecheck`, `npm run build`, `git diff --check`: passed.
 - `npm pack --dry-run`: includes the compiled server, README and integrations;
   generated build files are not committed.
@@ -42,3 +42,13 @@ This host lacks the Rust GDB pretty-printer scripts. Doctor reports the missing
 optional integration; live `String`, `Vec`, and `HashMap` formatting remains
 unverified here. Automated tests cover trusted SDK preparation, quoting, missing
 scripts and escaping symlinks. No system packages were installed.
+
+## Independent review
+
+A fresh whole-branch review identified two breakpoint event defects. Both were
+reproduced by failing tests and corrected: immediate events delivered in the
+same chunk as a response are retained until response results are registered;
+events match by their session-wide breakpoint ID even when the adapter reports
+a canonicalized source path. Tests include ID zero and replacement of existing
+results while preserving requested conditions and lines for restart. No critical
+findings or deferred minor findings remained.
