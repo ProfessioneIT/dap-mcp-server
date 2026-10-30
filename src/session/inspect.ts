@@ -24,7 +24,7 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { DebugSession } from "./session.js";
 import { AdapterConfig, BreakpointResult, ExceptionDetails } from "../dap/types.js";
-import { buildLaunchArgs, launchFailureHint } from "../adapters/recipes.js";
+import { buildLaunchArgs, launchFailureHint, prepareNativeAdapterConfig } from "../adapters/recipes.js";
 
 export interface InspectOptions {
   adapter: string;
@@ -78,13 +78,14 @@ export async function runDebugInspect(
   sessions: SessionManager,
   opts: InspectOptions
 ): Promise<InspectResult> {
-  const config = opts.adapterConfig ?? registry.get(opts.adapter);
+  let config = opts.adapterConfig ?? registry.get(opts.adapter);
   if (!config) {
     throw new Error(
       `Adapter '${opts.adapter}' not found. Use list_adapters to see available adapters or configure_adapter to register one.`
     );
   }
 
+  config = await prepareNativeAdapterConfig(config, { cwd: opts.cwd, sourceFiles: [opts.at.file] });
   const id = sessions.generateId();
   const session = new DebugSession(id, config);
   sessions.add(session);

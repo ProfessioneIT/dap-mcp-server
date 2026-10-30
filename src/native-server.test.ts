@@ -86,4 +86,38 @@ describe("native compiled targets over MCP", () => {
       await client.callTool({ name: "debug_disconnect", arguments: { sessionId: payload.sessionId } });
     }
   });
+
+  it("maps the public processId to GDB pid before attaching", async () => {
+    const attached = await client.callTool({ name: "debug_attach", arguments: {
+      adapter: "gdb", processId: 42, breakpoints: [{ file: "/test/app.rs", line: 5 }],
+    } });
+    expect(attached.isError).not.toBe(true);
+    const payload = JSON.parse((attached.content as Array<{ text: string }>)[0].text);
+    expect(payload.status).toBe("stopped");
+    await client.callTool({ name: "debug_disconnect", arguments: { sessionId: payload.sessionId } });
+  });
+
+  it("reuses a GDB session's requested breakpoints and adapter on restart", async () => {
+    const launch = await client.callTool({ name: "debug_launch", arguments: {
+      adapter: "gdb", program: "/test/pet", breakpoints: [{ file: "/test/app.rs", line: 5, condition: "x == 42" }],
+    } });
+    expect(launch.isError).not.toBe(true);
+    const first = JSON.parse((launch.content as Array<{ text: string }>)[0].text);
+    const restart = await client.callTool({ name: "debug_restart", arguments: { sessionId: first.sessionId } });
+    expect(restart.isError).not.toBe(true);
+    const second = JSON.parse((restart.content as Array<{ text: string }>)[0].text);
+    try {
+      const listed = await client.callTool({ name: "list_breakpoints", arguments: { sessionId: second.sessionId } });
+      expect(JSON.parse((listed.content as Array<{ text: string }>)[0].text).files[0].breakpoints[0]).toMatchObject({ line: 5, condition: "x == 42", verified: true });
+    } finally {
+      await client.callTool({ name: "debug_disconnect", arguments: { sessionId: second.sessionId } });
+    }
+  });
+
+  it("removes the session after a GDB launch fails", async () => {
+    const launch = await client.callTool({ name: "debug_launch", arguments: { adapter: "gdb", program: "/test/source.rs" } });
+    expect(launch.isError).toBe(true);
+    const listed = await client.readResource({ uri: "dap://sessions" });
+    expect(JSON.parse((listed.contents[0] as { text: string }).text)).toEqual([]);
+  });
 });

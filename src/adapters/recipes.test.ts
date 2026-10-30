@@ -20,11 +20,11 @@
  * SOFTWARE.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildLaunchArgs, defaultCargoProgram, launchFailureHint } from "./recipes.js";
+import { buildLaunchArgs, defaultCargoProgram, launchFailureHint, buildAttachArgs, prepareNativeAdapterConfig } from "./recipes.js";
 
 describe("launch recipes", () => {
   let tmpDir: string;
@@ -34,6 +34,7 @@ describe("launch recipes", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -43,6 +44,68 @@ describe("launch recipes", () => {
     await fs.writeFile(path.join(etc, "lldb_lookup.py"), "# fixture");
     return path.join(tmpDir, "sysroot");
   }
+
+  it.each([["gdb", "pid"], ["cppdbg", "processId"]])("translates local attach for %s with explicit precedence", (type, key) => {
+    expect(buildAttachArgs({ type, program: "debugger", launchDefaults: { [key]: 1 } }, {
+      processId: 42, attachConfig: { [key]: 2 },
+    })).toEqual({ [key]: 42 });
+  });
+
+  it("merges GDB environment overrides without changing other engines", async () => {
+    vi.stubEnv("DAP_GDB_INHERITED_TEST", "inherited");
+    const options = { stopOnEntry: false, env: { CUSTOM: "explicit" } };
+    const gdb = await buildLaunchArgs({ type: "gdb", program: "gdb" }, options);
+    expect(gdb.env).toMatchObject({ DAP_GDB_INHERITED_TEST: "inherited", CUSTOM: "explicit" });
+    expect((await buildLaunchArgs({ type: "python", program: "adapter" }, options)).env).toEqual({ CUSTOM: "explicit" });
+    expect((await buildLaunchArgs({ type: "gdb", program: "gdb" }, { stopOnEntry: false })).env).toBeUndefined();
+  });
+
+  async function fakeGdbSysroot() {
+    const sdk = path.join(tmpDir, 'sdk "quoted"');
+    const etc = path.join(sdk, "lib", "rustlib", "etc");
+    await fs.mkdir(etc, { recursive: true });
+    for (const file of ["gdb_load_rust_pretty_printers.py", "gdb_lookup.py", "gdb_providers.py", "rust_types.py"]) {
+      await fs.writeFile(path.join(etc, file), "# fixture\n");
+    }
+    return { sdk, etc };
+  }
+
+  it("prepares trusted Rust GDB formatters before spawn without mutating configuration", async () => {
+    const { sdk, etc } = await fakeGdbSysroot();
+    const config = { type: "gdb", program: "gdb", args: ["--nx", "--interpreter=dap"] };
+    const prepared = await prepareNativeAdapterConfig(config, { cwd: path.join(tmpDir, "project"), sourceFiles: ["/src/main.rs"] }, async () => sdk);
+    expect(config.args).toEqual(["--nx", "--interpreter=dap"]);
+    expect(prepared.args?.slice(0, 2)).toEqual(["--nx", "--interpreter=dap"]);
+    expect(prepared.args?.at(-2)).toBe("-iex");
+    const command = prepared.args?.at(-1) ?? "";
+    expect(command).toMatch(/^python /);
+    expect(command).not.toContain("\n");
+    expect(JSON.parse(command.match(/sys\.path\.insert\(0, ("(?:\\.|[^"\\])*")\)/)![1])).toBe(etc);
+    expect((await prepareNativeAdapterConfig(prepared, { sourceFiles: ["/src/main.rs"] }, async () => sdk)).args).toEqual(prepared.args);
+  });
+
+  it("does not load missing, project-local, symlink-escaped or non-Rust GDB scripts", async () => {
+    const { sdk, etc } = await fakeGdbSysroot();
+    const config = { type: "gdb", program: "gdb" };
+    expect(await prepareNativeAdapterConfig(config, { cwd: sdk, sourceFiles: ["/src/main.rs"] }, async () => sdk)).toEqual(config);
+    expect(await prepareNativeAdapterConfig(config, { sourceFiles: ["/src/main.c"] }, async () => sdk)).toEqual(config);
+    const file = path.join(etc, "gdb_lookup.py");
+    await fs.unlink(file);
+    expect(await prepareNativeAdapterConfig(config, { sourceFiles: ["/src/main.rs"] }, async () => sdk)).toEqual(config);
+    const escape = path.join(tmpDir, "untrusted.py");
+    await fs.writeFile(escape, "# untrusted"); await fs.symlink(escape, file);
+    expect(await prepareNativeAdapterConfig(config, { sourceFiles: ["/src/main.rs"] }, async () => sdk)).toEqual(config);
+  });
+
+  it("prepares a Cargo run without source breakpoints and tolerates failed toolchain discovery", async () => {
+    const { sdk } = await fakeGdbSysroot();
+    const project = path.join(tmpDir, "project");
+    await fs.mkdir(project);
+    await fs.writeFile(path.join(project, "Cargo.toml"), "[workspace]\n");
+    const config = { type: "gdb", program: "gdb" };
+    expect((await prepareNativeAdapterConfig(config, { cwd: project }, async () => sdk)).args).toContain("-iex");
+    expect(await prepareNativeAdapterConfig(config, { cwd: project }, async () => { throw new Error("rustc failed"); })).toEqual(config);
+  });
 
   it("layers adapter defaults below launchConfig below explicit fields", async () => {
     const args = await buildLaunchArgs(

@@ -38,7 +38,7 @@ import {
   resolveProjectAdapter,
   runDebugDoctor,
 } from "./diagnostics/doctor.js";
-import { buildLaunchArgs, defaultCargoProgram } from "./adapters/recipes.js";
+import { buildAttachArgs, buildLaunchArgs, defaultCargoProgram, prepareNativeAdapterConfig } from "./adapters/recipes.js";
 import { COMPACT_STACK_DEPTH, renderState } from "./session/state-format.js";
 
 function readPackageVersion(): string {
@@ -564,7 +564,7 @@ export function createServer(options: { globalDir?: string; projectDir?: string 
       let session: DebugSession | undefined;
       try {
         await registryReady;
-        const config =
+        let config =
           adapterConfig ??
           registry.get(adapter);
 
@@ -580,6 +580,7 @@ export function createServer(options: { globalDir?: string; projectDir?: string 
           };
         }
 
+        config = await prepareNativeAdapterConfig(config, { cwd, sourceFiles: breakpoints?.map((bp) => bp.file) });
         const id = sessions.generateId();
         session = new DebugSession(id, config);
         sessions.add(session);
@@ -712,7 +713,7 @@ export function createServer(options: { globalDir?: string; projectDir?: string 
       let session: DebugSession | undefined;
       try {
         await registryReady;
-        const config = adapterConfig ?? registry.get(adapter);
+        let config = adapterConfig ?? registry.get(adapter);
         if (!config) {
           return {
             content: [
@@ -725,20 +726,14 @@ export function createServer(options: { globalDir?: string; projectDir?: string 
           };
         }
 
+        config = await prepareNativeAdapterConfig(config, { sourceFiles: breakpoints?.map((bp) => bp.file) });
         const id = sessions.generateId();
         session = new DebugSession(id, config);
         sessions.add(session);
 
         await session.initialize();
 
-        // Merge order: adapter defaults (lowest priority) < user attachConfig < explicit params (highest)
-        const attachArgs: Record<string, unknown> = {
-          ...config.launchDefaults,
-          ...attachConfig,
-        };
-        if (port !== undefined) attachArgs.port = port;
-        if (host !== undefined) attachArgs.host = host;
-        if (processId !== undefined) attachArgs.processId = processId;
+        const attachArgs = buildAttachArgs(config, { processId, port, host, attachConfig });
 
         // Send attach first (don't await — real adapters block until configurationDone)
         const attachPromise = session.attach(attachArgs);

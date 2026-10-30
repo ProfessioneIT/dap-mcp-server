@@ -28,6 +28,10 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import { resolveProjectAdapter } from "./doctor.js";
 
 const available = vi.hoisted(() => ({ gdb: true, lldb: true }));
+vi.mock("../adapters/recipes.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../adapters/recipes.js")>(),
+  prepareNativeAdapterConfig: async (config: unknown) => config,
+}));
 vi.mock("../adapters/detect.js", () => ({
   inspectAdapterAvailability: async (config: { type: string; program: string }) => ({
     command: config.program, available: config.type === "gdb" ? available.gdb : config.type === "cppdbg" ? available.lldb : true,
@@ -42,6 +46,13 @@ describe("Rust engine selection", () => {
     await fs.writeFile(path.join(directory, "Cargo.toml"), '[package]\nname = "pet"\n');
   });
   afterEach(async () => { await fs.rm(directory, { recursive: true, force: true }); });
+
+  it("explains how to enable absent optional GDB Rust formatters", async () => {
+    available.gdb = true;
+    const result = await resolveProjectAdapter(new AdapterRegistry(directory, directory), { cwd: directory }, "linux");
+    expect(result.result.nextSteps.join(" ")).toMatch(/formatters.*unavailable.*rust-gdb/i);
+    expect(result.result.ready).toBe(true);
+  });
 
   it.each([
     ["linux", true, true, undefined, "gdb", true],
