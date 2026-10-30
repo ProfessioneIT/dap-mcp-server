@@ -22,6 +22,40 @@
 
 import { describe, it, expect } from "vitest";
 import { checkAdapterAvailable, inspectAdapterAvailability } from "./detect.js";
+import { AdapterRegistry } from "./registry.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const gdbFixture = fileURLToPath(new URL("../test-fixtures/gdb-mock-adapter.js", import.meta.url));
+
+describe("GDB DAP readiness", () => {
+  it("makes the built-in GDB adapter discoverable without replacing LLDB", () => {
+    const registry = new AdapterRegistry("/unused/global", "/unused/project");
+    expect(registry.get("gdb")?.program).toBe("gdb");
+    expect(registry.get("cppdbg")?.program).toBe("lldb-dap");
+  });
+
+  it.each(["ready", "reject", "cli", "malformed", "silent", "exit"])(
+    "probes the complete configured command and disposes the %s adapter", async (mode) => {
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "gdb-probe-"));
+      const pidFile = path.join(tmp, "pid");
+      try {
+        const result = await inspectAdapterAvailability({
+          type: "gdb", runtime: process.execPath, program: gdbFixture,
+          args: [`--mode=${mode}`, `--pid-file=${pidFile}`],
+        });
+        expect(result.available).toBe(mode === "ready");
+        if (mode !== "ready") expect(result.reason).toMatch(/DAP|exit|initializ|JSON|timeout|timed out/i);
+        const pid = Number(await fs.readFile(pidFile, "utf8"));
+        expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        await fs.rm(tmp, { recursive: true, force: true });
+      }
+    }, 8000,
+  );
+});
 
 describe("checkAdapterAvailable", () => {
   it("detects 'node' as available", async () => {

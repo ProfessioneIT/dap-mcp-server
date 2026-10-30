@@ -62,6 +62,9 @@ export class DebugSession {
   private nextOutputSeq = 1;
   private lastReportedOutputSeq = 0;
   private breakpointsMap = new Map<string, BreakpointConfig[]>();
+  private breakpointResults = new Map<string, BreakpointResult[]>();
+  private pendingBreakpointRequests = 0;
+  private pendingBreakpointUpdates = new Map<number, DebugProtocol.BreakpointEvent["body"]>();
   private capabilities: DebugProtocol.Capabilities = {};
   private stoppedThreadId?: number;
   private stoppedReason?: string;
@@ -129,6 +132,7 @@ export class DebugSession {
         adapterID: this.adapterConfig.type,
         clientID: "dap-mcp-server",
         clientName: "DAP MCP Server",
+        supportsVariableType: true,
         linesStartAt1: true,
         columnsStartAt1: true,
         pathFormat: "path",
@@ -175,21 +179,32 @@ export class DebugSession {
   ): Promise<BreakpointResult[]> {
     const absPath = path.resolve(filePath);
     this.breakpointsMap.set(absPath, breakpoints);
-    const response = await this.client.sendRequest("setBreakpoints", {
-      source: { path: absPath },
-      breakpoints: breakpoints.map((bp) => ({
-        line: bp.line,
-        condition: bp.condition,
-        hitCondition: bp.hitCondition,
-        logMessage: bp.logMessage,
-      })),
-    });
-    return ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
-      id: bp.id,
-      verified: bp.verified ?? false,
-      line: bp.line ?? 0,
-      message: bp.message,
-    }));
+    this.pendingBreakpointRequests++;
+    try {
+      const response = await this.client.sendRequest("setBreakpoints", {
+        source: { path: absPath },
+        breakpoints: breakpoints.map((bp) => ({
+          line: bp.line,
+          condition: bp.condition,
+          hitCondition: bp.hitCondition,
+          logMessage: bp.logMessage,
+        })),
+      });
+      const results = ((response.body?.breakpoints as DebugProtocol.Breakpoint[]) || []).map((bp) => ({
+        id: bp.id,
+        verified: bp.verified ?? false,
+        line: bp.line ?? 0,
+        message: bp.message,
+      }));
+      this.breakpointResults.set(absPath, results);
+      // A response and its following event can be parsed synchronously in one
+      // chunk, before this await resumes. Replay updates on the new results.
+      for (const update of this.pendingBreakpointUpdates.values()) this.applyBreakpointUpdate(update);
+      return results;
+    } finally {
+      this.pendingBreakpointRequests--;
+      if (this.pendingBreakpointRequests === 0) this.pendingBreakpointUpdates.clear();
+    }
   }
 
   async setExceptionBreakpoints(filters: string[]): Promise<void> {
@@ -589,8 +604,34 @@ export class DebugSession {
     return this.breakpointsMap;
   }
 
+  getBreakpointResults(): Map<string, BreakpointResult[]> {
+    return this.breakpointResults;
+  }
+
+  private applyBreakpointUpdate(body: DebugProtocol.BreakpointEvent["body"]): void {
+    const breakpoint = body.breakpoint;
+    // DAP IDs identify breakpoints across the session. A reported source can
+    // be canonicalized or remapped and must not veto a matching ID.
+    for (const values of this.breakpointResults.values()) {
+      const existing = values.find((value) => value.id === breakpoint.id);
+      if (!existing) continue;
+      existing.verified = body.reason === "removed" ? false : breakpoint.verified;
+      if (breakpoint.line !== undefined) existing.line = breakpoint.line;
+      existing.message = breakpoint.message;
+      break;
+    }
+  }
+
   private handleEvent(event: DebugProtocol.Event): void {
     switch (event.event) {
+      case "breakpoint": {
+        const body = event.body as DebugProtocol.BreakpointEvent["body"] | undefined;
+        const breakpoint = body?.breakpoint;
+        if (!body || typeof breakpoint?.id !== "number") break;
+        if (this.pendingBreakpointRequests > 0) this.pendingBreakpointUpdates.set(breakpoint.id, body);
+        this.applyBreakpointUpdate(body);
+        break;
+      }
       case "initialized":
         this._initializedReceived = true;
         for (const resolve of this.initializedResolvers) resolve();

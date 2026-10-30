@@ -52,7 +52,7 @@ async function exists(filePath: string): Promise<boolean> {
 let rustSysroot: Promise<string | undefined> | undefined;
 
 function findRustSysroot(): Promise<string | undefined> {
-  rustSysroot ??= execFileAsync("rustc", ["--print", "sysroot"])
+  rustSysroot ??= execFileAsync("rustc", ["--print", "sysroot"], { timeout: 2000, maxBuffer: 65536 })
     .then(({ stdout }) => stdout.trim() || undefined)
     .catch(() => undefined);
   return rustSysroot;
@@ -72,6 +72,59 @@ async function rustFormatterCommands(sysroot: string | undefined): Promise<strin
   const legacyCommands = path.join(etc, "lldb_commands");
   if (await exists(legacyCommands)) commands.push(`command source -s 0 "${legacyCommands}"`);
   return commands;
+}
+
+function isWithin(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+/** Prepare GDB's Python formatters before initialize, without changing registry state. */
+export async function prepareNativeAdapterConfig(
+  config: AdapterConfig,
+  options: { cwd?: string; sourceFiles?: string[] },
+  resolveRustSysroot: () => Promise<string | undefined> = findRustSysroot,
+): Promise<AdapterConfig> {
+  if (config.type !== "gdb") return config;
+  const sources = options.sourceFiles ?? [];
+  const involvesRust = sources.some((file) => path.extname(file).toLowerCase() === ".rs") ||
+    (sources.length === 0 && await exists(path.join(options.cwd ?? process.cwd(), "Cargo.toml")));
+  if (!involvesRust || config.args?.some((arg) => arg.includes("gdb_load_rust_pretty_printers.py"))) return config;
+
+  // Only load scripts from the installed toolchain, never from the project or
+  // through a symlink escaping that toolchain. Missing integration is optional.
+  try {
+    const sysroot = await resolveRustSysroot();
+    if (!sysroot) return config;
+    const root = await fs.realpath(sysroot);
+    const etc = await fs.realpath(path.join(root, "lib", "rustlib", "etc"));
+    const project = await fs.realpath(options.cwd ?? process.cwd()).catch(() => path.resolve(options.cwd ?? process.cwd()));
+    if (!isWithin(root, etc) || isWithin(project, etc) || /[\x00-\x1f]/.test(etc)) return config;
+    const scripts = ["gdb_load_rust_pretty_printers.py", "gdb_lookup.py", "gdb_providers.py", "rust_types.py"];
+    for (const script of scripts) {
+      const real = await fs.realpath(path.join(etc, script));
+      if (!isWithin(etc, real) || !(await fs.stat(real)).isFile()) return config;
+    }
+    const loader = JSON.stringify(path.join(etc, scripts[0]));
+    // Prepend the trusted directory so imports cannot resolve through the
+    // debuggee's working directory. JSON quoting also forms Python string literals.
+    const command = `python import sys; sys.path.insert(0, ${JSON.stringify(etc)}); exec(compile(open(${loader}, "rb").read(), ${loader}, "exec"), {"__file__": ${loader}})`;
+    return { ...config, args: [...(config.args ?? []), "-iex", command] };
+  } catch {
+    return config;
+  }
+}
+
+/** Adapter defaults < attachConfig < explicit common parameters. */
+export function buildAttachArgs(
+  config: AdapterConfig,
+  options: { processId?: number; host?: string; port?: number; attachConfig?: Record<string, unknown> },
+): Record<string, unknown> {
+  const args: Record<string, unknown> = { ...config.launchDefaults, ...options.attachConfig };
+  if (options.port !== undefined) args.port = options.port;
+  if (options.host !== undefined) args.host = options.host;
+  if (options.processId !== undefined) args[config.type === "gdb" ? "pid" : "processId"] = options.processId;
+  return args;
 }
 
 /**
@@ -94,6 +147,12 @@ export async function buildLaunchArgs(
   if (opts.args !== undefined) launchArgs.args = opts.args;
   if (opts.cwd !== undefined) launchArgs.cwd = opts.cwd;
   if (opts.env !== undefined) launchArgs.env = opts.env;
+
+  // GDB's DAP env replaces the entire environment rather than applying overrides.
+  if (config.type === "gdb" && launchArgs.env && typeof launchArgs.env === "object" && !Array.isArray(launchArgs.env)) {
+    const inherited = Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined));
+    launchArgs.env = { ...inherited, ...launchArgs.env };
+  }
 
   // delve's `cwd` is the debuggee's working directory; the *build* (go build)
   // runs from delve's own process cwd, controlled by `dlvCwd`. Mirror

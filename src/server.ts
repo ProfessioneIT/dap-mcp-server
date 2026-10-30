@@ -38,7 +38,7 @@ import {
   resolveProjectAdapter,
   runDebugDoctor,
 } from "./diagnostics/doctor.js";
-import { buildLaunchArgs, defaultCargoProgram } from "./adapters/recipes.js";
+import { buildAttachArgs, buildLaunchArgs, defaultCargoProgram, prepareNativeAdapterConfig } from "./adapters/recipes.js";
 import { COMPACT_STACK_DEPTH, renderState } from "./session/state-format.js";
 
 function readPackageVersion(): string {
@@ -53,9 +53,9 @@ function readPackageVersion(): string {
   }
 }
 
-export function createServer(): McpServer {
-  const globalDir = path.join(os.homedir(), ".dap-mcp");
-  const projectDir = path.join(process.cwd(), ".dap-mcp");
+export function createServer(options: { globalDir?: string; projectDir?: string } = {}): McpServer {
+  const globalDir = options.globalDir ?? path.join(os.homedir(), ".dap-mcp");
+  const projectDir = options.projectDir ?? path.join(process.cwd(), ".dap-mcp");
 
   const registry = new AdapterRegistry(globalDir, projectDir);
   const sessions = new SessionManager();
@@ -334,10 +334,10 @@ export function createServer(): McpServer {
             (key) => options.launchConfig?.[key] !== undefined
           );
         const compiledProgram =
-          !options.program && !hasLaunchTarget && adapter === "cppdbg"
+          !options.program && !hasLaunchTarget && ["cppdbg", "gdb"].includes(adapter)
             ? await defaultCargoProgram(cwd)
             : undefined;
-        if (!options.program && !hasLaunchTarget && adapter === "cppdbg" && !compiledProgram) {
+        if (!options.program && !hasLaunchTarget && ["cppdbg", "gdb"].includes(adapter) && !compiledProgram) {
           return {
             content: [
               {
@@ -564,7 +564,7 @@ export function createServer(): McpServer {
       let session: DebugSession | undefined;
       try {
         await registryReady;
-        const config =
+        let config =
           adapterConfig ??
           registry.get(adapter);
 
@@ -580,6 +580,7 @@ export function createServer(): McpServer {
           };
         }
 
+        config = await prepareNativeAdapterConfig(config, { cwd, sourceFiles: breakpoints?.map((bp) => bp.file) });
         const id = sessions.generateId();
         session = new DebugSession(id, config);
         sessions.add(session);
@@ -712,7 +713,7 @@ export function createServer(): McpServer {
       let session: DebugSession | undefined;
       try {
         await registryReady;
-        const config = adapterConfig ?? registry.get(adapter);
+        let config = adapterConfig ?? registry.get(adapter);
         if (!config) {
           return {
             content: [
@@ -725,20 +726,14 @@ export function createServer(): McpServer {
           };
         }
 
+        config = await prepareNativeAdapterConfig(config, { sourceFiles: breakpoints?.map((bp) => bp.file) });
         const id = sessions.generateId();
         session = new DebugSession(id, config);
         sessions.add(session);
 
         await session.initialize();
 
-        // Merge order: adapter defaults (lowest priority) < user attachConfig < explicit params (highest)
-        const attachArgs: Record<string, unknown> = {
-          ...config.launchDefaults,
-          ...attachConfig,
-        };
-        if (port !== undefined) attachArgs.port = port;
-        if (host !== undefined) attachArgs.host = host;
-        if (processId !== undefined) attachArgs.processId = processId;
+        const attachArgs = buildAttachArgs(config, { processId, port, host, attachConfig });
 
         // Send attach first (don't await — real adapters block until configurationDone)
         const attachPromise = session.attach(attachArgs);
@@ -1328,7 +1323,13 @@ export function createServer(): McpServer {
         const bps = session.getBreakpoints();
         const files = Array.from(bps.entries()).map(([file, breakpoints]) => ({
           file,
-          breakpoints,
+          breakpoints: breakpoints.map((requested, index) => {
+            const resolved = session.getBreakpointResults().get(file)?.[index];
+            return resolved ? {
+              ...requested, id: resolved.id, verified: resolved.verified,
+              resolvedLine: resolved.line, message: resolved.message,
+            } : requested;
+          }),
         }));
         const totalCount = files.reduce((n, f) => n + f.breakpoints.length, 0);
         return {

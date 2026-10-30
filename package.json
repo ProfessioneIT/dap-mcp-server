@@ -1,6 +1,6 @@
 {
   "name": "dap-mcp-server",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "MCP server wrapping the Debug Adapter Protocol for AI-driven debugging",
   "keywords": [
     "LLM",
@@ -22,7 +22,8 @@
   "files": [
     "build",
     "SKILL.md",
-    "integrations/claude/dap-debugging"
+    "integrations/claude/dap-debugging",
+    "integrations/codex"
   ],
   "directories": {
     "doc": "docs"

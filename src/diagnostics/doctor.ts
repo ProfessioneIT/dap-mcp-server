@@ -24,7 +24,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { inspectAdapterAvailability } from "../adapters/detect.js";
-import { adapterUsageNote } from "../adapters/recipes.js";
+import { adapterUsageNote, prepareNativeAdapterConfig } from "../adapters/recipes.js";
 import { AdapterConfig } from "../dap/types.js";
 
 export interface ProjectSignals {
@@ -224,20 +224,25 @@ function preferredAdapter(signals: ProjectSignals, sourceFile?: string): string 
 
 export async function resolveProjectAdapter(
   registry: AdapterRegistry,
-  options: { cwd?: string; adapter?: string; sourceFile?: string } = {}
+  options: { cwd?: string; adapter?: string; sourceFile?: string } = {},
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ResolvedProjectAdapter> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const stat = await fs.stat(cwd).catch(() => undefined);
   if (!stat?.isDirectory()) throw new Error(`Working directory '${cwd}' does not exist.`);
 
   const detected = await detectProjectSignals(cwd, options.sourceFile);
-  const recommendedAdapter = options.adapter ?? preferredAdapter(detected, options.sourceFile);
+  const sourceLanguage = (options.sourceFile ? languageOf(options.sourceFile) : undefined) ?? detected.languages[0];
+  let recommendedAdapter = options.adapter ?? preferredAdapter(detected, options.sourceFile);
   const adapters: DoctorAdapter[] = [];
   const configs = new Map<string, AdapterConfig>();
 
   for (const adapter of registry.listAll()) {
     const { source: _source, ...baseConfig } = adapter;
     let config: AdapterConfig = baseConfig;
+    if (adapter.type === "gdb" && sourceLanguage === "rust") {
+      config = await prepareNativeAdapterConfig(config, { cwd, sourceFiles: options.sourceFile ? [options.sourceFile] : undefined });
+    }
     if (adapter.type === "python" && detected.pythonPath) {
       config = { ...config, runtime: detected.pythonPath };
     }
@@ -264,8 +269,15 @@ export async function resolveProjectAdapter(
     });
   }
 
+  const preferGdb = options.adapter === undefined && sourceLanguage === "rust" && platform === "linux";
+  const gdb = adapters.find((adapter) => adapter.type === "gdb");
+  if (preferGdb) recommendedAdapter = gdb?.available ? "gdb" : "cppdbg";
+  for (const adapter of adapters) adapter.selected = adapter.type === recommendedAdapter;
   const selected = adapters.find((adapter) => adapter.selected);
   const nextSteps: string[] = [];
+  if (preferGdb && !gdb?.available) {
+    nextSteps.push(`GDB/DAP is unavailable (${gdb?.reason ?? "adapter not configured"}); selecting LLDB before launch. Install a DAP-capable GDB or select cppdbg explicitly.`);
+  }
   if (!recommendedAdapter) {
     nextSteps.push("Specify an adapter explicitly; no supported project language was detected.");
   } else if (!selected) {
@@ -278,6 +290,12 @@ export async function resolveProjectAdapter(
     }
   }
   if (selected?.available) {
+    if (sourceLanguage === "rust" && selected.type === "gdb") {
+      nextSteps.push("Rust uses GDB/DAP. Build with debug information and supply the compiled executable for Cargo workspaces. Rust GDB pretty-printers are optional for standard-library containers.");
+      if (!configs.get("gdb")?.args?.some((arg) => arg.includes("gdb_load_rust_pretty_printers.py"))) {
+        nextSteps.push("Automatic Rust GDB formatters are unavailable. Install the matching toolchain's rust-gdb integration or configure your own trusted formatter setup; scalar debugging remains available.");
+      }
+    }
     // Rust rides on cppdbg, so look the note up by language before adapter.
     const language = detected.languages.find(
       (name) => (LANGUAGE_ADAPTERS[name] ?? name) === selected.type && adapterUsageNote(name)

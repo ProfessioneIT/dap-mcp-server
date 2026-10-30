@@ -24,6 +24,13 @@ import { AdapterConfig } from "../dap/types.js";
 
 export const BUILTIN_ADAPTERS: AdapterConfig[] = [
   {
+    type: "gdb",
+    program: "gdb",
+    args: ["--nx", "--quiet", "--interpreter=dap"],
+    transport: "stdio",
+    installHint: "Install GDB with Python and native DAP support (gdb --interpreter=dap).",
+  },
+  {
     type: "python",
     runtime: "python3",
     program: "-m",

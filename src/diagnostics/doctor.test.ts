@@ -119,6 +119,7 @@ describe("debug doctor", () => {
   it("detects Cargo projects and maps Rust onto the cppdbg adapter", async () => {
     await fs.writeFile(path.join(tmpDir, "Cargo.toml"), '[package]\nname = "wordfreq"\n');
     const registry = new AdapterRegistry(tmpDir, tmpDir);
+    registry.register({ type: "gdb", program: "definitely-missing-gdb-fixture" });
 
     const result = await runDebugDoctor(registry, { cwd: tmpDir });
     expect(result.detected.languages).toContain("rust");
@@ -140,6 +141,7 @@ describe("debug doctor", () => {
     ["Bank.java", "java"],
   ])("selects the adapter for a %s breakpoint file", async (file, adapter) => {
     const registry = new AdapterRegistry(tmpDir, tmpDir);
+    registry.register({ type: "gdb", program: "definitely-missing-gdb-fixture" });
     const resolved = await resolveProjectAdapter(registry, {
       cwd: tmpDir,
       sourceFile: path.join(tmpDir, file),

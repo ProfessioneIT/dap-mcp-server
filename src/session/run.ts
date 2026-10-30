@@ -24,7 +24,7 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import { SessionManager } from "./session-manager.js";
 import { DebugSession } from "./session.js";
 import { AdapterConfig } from "../dap/types.js";
-import { buildLaunchArgs } from "../adapters/recipes.js";
+import { buildLaunchArgs, prepareNativeAdapterConfig } from "../adapters/recipes.js";
 
 export interface RunOptions {
   adapter: string;
@@ -58,13 +58,14 @@ export async function runDebugRun(
   sessions: SessionManager,
   opts: RunOptions
 ): Promise<RunResult> {
-  const config = opts.adapterConfig ?? registry.get(opts.adapter);
+  let config = opts.adapterConfig ?? registry.get(opts.adapter);
   if (!config) {
     throw new Error(
       `Adapter '${opts.adapter}' not found. Use list_adapters to see available adapters or configure_adapter to register one.`
     );
   }
 
+  config = await prepareNativeAdapterConfig(config, { cwd: opts.cwd, sourceFiles: opts.logpoints?.map((lp) => lp.file) });
   const id = sessions.generateId();
   const session = new DebugSession(id, config);
   sessions.add(session);

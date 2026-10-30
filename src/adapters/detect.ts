@@ -25,6 +25,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { AdapterConfig } from "../dap/types.js";
+import { DAPClient } from "../dap/dap-client.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -86,6 +87,30 @@ export async function inspectAdapterAvailability(
       command,
       reason: `Executable '${command}' was not found on PATH.`,
     };
+  }
+
+  if (config.type === "gdb") {
+    const fullCommand = [config.runtime, config.program, ...(config.args ?? [])].filter(Boolean).join(" ");
+    const client = new DAPClient(config.runtime ?? "", config.program, config.args ?? [], {
+      transport: config.transport,
+      portMatcher: config.portMatcher,
+      tcpConnectTimeout: 2000,
+    });
+    try {
+      await client.spawn();
+      await client.sendRequest("initialize", {
+        adapterID: "gdb", clientID: "dap-mcp-server-readiness",
+        linesStartAt1: true, columnsStartAt1: true, pathFormat: "path",
+      }, 2000);
+      return { available: true, command: fullCommand };
+    } catch (err) {
+      return {
+        available: false, command: fullCommand,
+        reason: `GDB DAP initialization failed: ${err instanceof Error ? err.message : String(err)}. Use a GDB build with Python/DAP support and --interpreter=dap.`,
+      };
+    } finally {
+      await client.dispose();
+    }
   }
 
   if (!config.runtime) {
